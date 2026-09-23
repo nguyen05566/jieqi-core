@@ -1,0 +1,17 @@
+# Engine build outputs
+src/*.o
+src/.depend
+src/jieqi-core
+src/jieqi-core.exe
+bin/
+
+# Tests and instrumentation
+.test-bin/
+*.log
+*.profdata
+profdir/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
