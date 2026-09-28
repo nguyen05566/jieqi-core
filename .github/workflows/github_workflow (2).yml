@@ -1,0 +1,43 @@
+name: Sam Loc Reward Bot
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      max_claims:
+        description: 'So lan claim toi da'
+        default: '15'
+      cooldown:
+        description: 'Cooldown (giay)'
+        default: '3'
+
+jobs:
+  claim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      
+      - name: Install deps
+        run: |
+          pip install playwright
+          npx playwright install chromium --with-deps
+      
+      - name: Run bot
+        env:
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
+          MAX_CLAIMS: ${{ github.event.inputs.max_claims || '15' }}
+          COOLDOWN: ${{ github.event.inputs.cooldown || '3' }}
+          HEADLESS: 'true'
+        run: python3 sam_reward_bot_v3.py
+      
+      - name: Screenshot on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: /tmp/game_load_failed.png
+          if-no-files-found: ignore
