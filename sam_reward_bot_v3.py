@@ -23,7 +23,7 @@ if not FB_COOKIES:
     FB_COOKIES = "datr=Bu-naoV2DzYAsz945b81Jn1I; sb=Bu-nas9aEnxOeMtOfjOIAbRU; m_pixel_ratio=2; vpd=v1%3B616x360x2; c_user=61561542347462; xs=29%3ACFnA3wEH9B9D3A%3A2%3A1790554583%3A-1%3A-1; locale=en_GB; pas=100051928670915%3AdkPz2ivLwm%2C61561542347462%3AygtS8wYCm5; ps_l=1; ps_n=1; presence=C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1790621986752%2C%22v%22%3A1%7D; wd=360x616; fr=1ZgRRkYX1oP22NBXB.AWdhqJijw632suL5gyEWH6zdQJk2-HKqUlmlD2hniOm6xTA9ops.Bqp-8w..AAA.0.0.Bqurso.AWf_e7mTQsdpD5QFmU18288z6oM; fbl_st=101731726%3BT%3A29843708; wl_cbv=v2%3Bclient_version%3A3306%3Btimestamp%3A1790622504"
 
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
-MAX_CYCLES = int(os.environ.get("MAX_CYCLES", "30"))
+MAX_CYCLES = int(os.environ.get("MAX_CYCLES", "300"))
 DELAY = float(os.environ.get("DELAY", "3"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
