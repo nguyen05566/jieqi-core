@@ -8,7 +8,7 @@ on:
     inputs:
       max_claims:
         description: 'Số lần claim tối đa'
-        default: '15'
+        default: '1500'
       cooldown:
         description: 'Cooldown giữa các claim (giây)'
         default: '3'
@@ -16,7 +16,7 @@ on:
 jobs:
   claim-rewards:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v4
       
