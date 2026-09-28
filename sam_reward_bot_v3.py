@@ -67,7 +67,7 @@ def trigger_and_claim(gf):
     
     try:
         gf.evaluate("""() => {
-            const r = document.getElementById('radio_21');
+            const r = document.getElementById('radio_11');
             if (r) { r.checked = true; r.dispatchEvent(new Event('change', {bubbles: true})); }
         }""")
     except: pass
