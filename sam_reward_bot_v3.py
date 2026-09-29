@@ -26,7 +26,7 @@ from playwright.sync_api import sync_playwright
 
 FB_COOKIES = os.environ.get("FB_COOKIES", "").strip()
 if not FB_COOKIES:
-    FB_COOKIES = "datr=Bu-naoV2DzYAsz945b81Jn1I; sb=Bu-nas9aEnxOeMtOfjOIAbRU; m_pixel_ratio=2; vpd=v1%3B616x360x2; c_user=61561542347462; xs=29%3ACFnA3wEH9B9D3A%3A2%3A1790554583%3A-1%3A-1; locale=en_GB; pas=100051928670915%3AdkPz2ivLwm%2C61561542347462%3AygtS8wYCm5; ps_l=1; ps_n=1; presence=C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1790621986752%2C%22v%22%3A1%7D; wd=360x616; fr=1ZgRRkYX1oP22NBXB.AWeDfyKNRBHTEfAa4k7CtcS-hadKGLnZAbW84CjJ0ubJnUcfUwM.Bqp-8w..Gq6.0.0.BquswZ.AWeKnaxWSJiKFHwYo1N4JAbsU_g"
+    FB_COOKIES = "datr=wTqxagwB6O3uahzVPCqCfEeq; sb=wTqxalRIxpyhR2crWHRuh77e; c_user=61594630175338; ps_l=1; ps_n=1; xs=50%3AAgTydVPaDXYaFDg%3A2%3A1790607962%3A-1%3A-1%3A%3AAcwBIxflVmzb5hoy-Tw0EG0OOIxERB_Nz5yDcGokw1Y; wd=1920x953; fr=1FnoTgkPnHUQJwntp.AWdD9uA7Xs3fFXQRErhfLweJTrhmXAHQij4dTU9BE8PGtPj_ulQ.BquwGQ..AAA.0.0.BquwP4.AWcp6LDPW2HPBree8999V9Qf83I; presence=C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1790641153143%2C%22v%22%3A1%7D"
     # Mậu Binh first (unlimited), then others
 
 GAMES = [
