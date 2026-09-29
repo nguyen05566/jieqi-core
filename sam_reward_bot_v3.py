@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v6 — dùng lại cookie, mỗi N cycles đóng browser → nghỉ 60s → mở lại.
-
-Luồng:
-  Session 1: mở browser + nạp cookie cũ → chạy N cycles → đóng browser
-  Nghỉ 60s
-  Session 2: mở browser + nạp lại cookie cũ → chạy N cycles → đóng browser
-  ... lặp tới khi hết MAX_RUNTIME
-
-KHÔNG xoá cookie. KHÔNG logout.php. Cookie giữ nguyên trong RAM suốt job.
+"""FB Sam loc reward bot v8 — y như bản gốc, thêm vòng lặp:
+mở browser → login → 30 cycles → close → nghỉ 60s → lặp lại.
+Cookie KHÔNG bị xoá, dùng lại nguyên vẹn.
 """
 import os, sys, time
 
@@ -24,13 +18,11 @@ if not FB_COOKIES:
     FB_COOKIES = "datr=Bu-naoV2DzYAsz945b81Jn1I; sb=Bu-nas9aEnxOeMtOfjOIAbRU; m_pixel_ratio=2; vpd=v1%3B616x360x2; c_user=61561542347462; xs=29%3ACFnA3wEH9B9D3A%3A2%3A1790554583%3A-1%3A-1; locale=en_GB; pas=100051928670915%3AdkPz2ivLwm%2C61561542347462%3AygtS8wYCm5; ps_l=1; ps_n=1; presence=C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1790621986752%2C%22v%22%3A1%7D; wd=360x616; fr=1ZgRRkYX1oP22NBXB.AWdhqJijw632suL5gyEWH6zdQJk2-HKqUlmlD2hniOm6xTA9ops.Bqp-8w..AAA.0.0.Bqurso.AWf_e7mTQsdpD5QFmU18288z6oM; fbl_st=101731726%3BT%3A29843708; wl_cbv=v2%3Bclient_version%3A3306%3Btimestamp%3A1790622504"
 
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
-
-# ===== CẤU HÌNH =====
-CYCLES_PER_LOGIN  = int(os.environ.get("MAX_CLAIMS", "30"))          # 30 cycles rồi đóng browser
-DELAY             = float(os.environ.get("COOLDOWN", "3"))            # nghỉ giữa các claim
-REST_AFTER_LOGOUT = int(os.environ.get("REST_BETWEEN_RUNS", "60"))    # nghỉ 60s sau khi đóng browser
-MAX_RUNTIME       = int(os.environ.get("MAX_RUNTIME", str(330 * 60))) # tổng thời gian chạy (5.5h)
-HEADLESS          = os.environ.get("HEADLESS", "true").lower() == "true"
+MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
+DELAY = float(os.environ.get("COOLDOWN", "3"))
+REST = int(os.environ.get("REST_BETWEEN_RUNS", "60"))
+MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
+HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 
 def get_bal(gf):
@@ -38,16 +30,6 @@ def get_bal(gf):
         return gf.evaluate("() => document.querySelector('.chipBalance')?.textContent.trim() || '?'")
     except:
         return "?"
-
-
-def parse_bal(s):
-    if not s or s == '?': return 0
-    try:
-        s = s.lower().replace(',', '').strip()
-        if 'k' in s: return int(float(s.replace('k', '')) * 1000)
-        if 'm' in s: return int(float(s.replace('m', '')) * 1000000)
-        return int(float(s))
-    except: return 0
 
 
 def find_gf(page, max_wait=60):
@@ -60,7 +42,7 @@ def find_gf(page, max_wait=60):
 
 
 def trigger_and_claim(gf):
-    """createTable(25k) → trigger 'not enough xu' → click Watch video → claim."""
+    """Y NGUYÊN mã gốc."""
     try:
         gf.evaluate("createTable()")
     except: pass
@@ -126,7 +108,7 @@ def trigger_and_claim(gf):
                                 if (window.Ads.RewardedVideo.updateRewardButton)
                                     window.Ads.RewardedVideo.updateRewardButton();
                             }
-                            resolve({success: true, amount: amount, method: 'alert+reward'});
+                            resolve({success: true, amount: amount});
                         } catch(e) {
                             resolve({success: true, amount: 0, error: e.toString()});
                         }
@@ -149,13 +131,10 @@ def trigger_and_claim(gf):
     return result
 
 
-# ======================================================================
-#  LOGIN / CLOSE — mỗi session 1 browser riêng, NẠP LẠI COOKIE CŨ
-# ======================================================================
-def do_login(p, fb_cookies):
-    """Mở browser mới + nạp lại cookie cũ + mở game.
-    Trả về (browser, context, page, gf) hoặc (None, None, None, None) nếu fail.
-    """
+def run_one_session(p, fb_cookies, session_id, started_at):
+    """Mở browser mới → login → chạy MAX_CYCLES → close. Trả (total, ok, fail, cookies_still_ok)."""
+    print(f"\n########## SESSION {session_id} ##########", flush=True)
+
     browser = p.chromium.launch(
         headless=HEADLESS,
         args=["--no-sandbox", "--disable-dev-shm-usage",
@@ -167,64 +146,54 @@ def do_login(p, fb_cookies):
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
     )
-
-    # NẠP LẠI COOKIE CŨ (không bao giờ xoá)
     for c in fb_cookies:
         c['domain'] = '.facebook.com'
     context.add_cookies(fb_cookies)
-
     page = context.new_page()
 
-    print("  [OPEN] Mở facebook.com (dùng cookie cũ)...", flush=True)
+    # ===== Y NGUYÊN mã gốc =====
+    print("[1] Login FB...", flush=True)
     page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(5000)
-
     if page.locator('input[placeholder="Email or phone"]').count() > 0:
-        print("  [OPEN] ERROR: Cookie hết hạn → cần update FB_COOKIES", flush=True)
+        print("  ERROR: Not logged in", flush=True)
         browser.close()
-        return None, None, None, None
-    print("  [OPEN] OK (cookie hợp lệ)", flush=True)
+        return 0, 0, 0, False
+    print("  OK", flush=True)
 
-    print("  [OPEN] Mở game...", flush=True)
+    print("[2] Open game...", flush=True)
     page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
     page.wait_for_timeout(20000)
     gf = find_gf(page, max_wait=60)
     if not gf:
-        print("  [OPEN] ERROR: Game frame not found", flush=True)
+        print("  ERROR: Game frame not found", flush=True)
         browser.close()
-        return None, None, None, None
+        return 0, 0, 0, True
+    print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
+    print("[3] Wait WS...", flush=True)
     for _ in range(10):
         try:
             if gf.evaluate("() => window.connection && connection.ws && connection.ws.readyState === 1"):
-                print("  [OPEN] WS connected", flush=True)
+                print("  WS connected", flush=True)
                 break
         except: pass
         time.sleep(3)
 
-    return browser, context, page, gf
-
-
-def do_close(browser):
-    """CHỈ ĐÓNG BROWSER — KHÔNG xoá cookie, KHÔNG logout.php."""
-    print("  [CLOSE] Đóng browser (giữ nguyên cookie)...", flush=True)
-    try:
-        browser.close()
-        print("  [CLOSE] Đã đóng browser", flush=True)
-    except Exception as e:
-        print(f"    close lỗi: {e}", flush=True)
-
-
-def run_cycles(gf, cycles, session_id, started_at):
-    """Chạy `cycles` lần claim. Trả về (total, ok, fail)."""
-    total, ok, fail = 0, 0, 0
     bal_start = get_bal(gf)
-    print(f"\n[SESSION {session_id}] Bắt đầu | balance={bal_start} | cycles={cycles}", flush=True)
+    print(f"  Balance: {bal_start}", flush=True)
 
-    for i in range(cycles):
+    # ===== Vòng claim — y nguyên mã gốc =====
+    print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
+    total = 0
+    ok = 0
+    fail = 0
+    rewards = []
+
+    for i in range(MAX_CYCLES):
         if time.time() - started_at > MAX_RUNTIME:
-            print(f"  Hết thời gian cho phép, dừng session sớm.", flush=True)
+            print("  Hết thời gian cho phép, dừng session.", flush=True)
             break
 
         bal_before = get_bal(gf)
@@ -239,30 +208,39 @@ def run_cycles(gf, cycles, session_id, started_at):
             amount = result['amount']
             total += amount
             ok += 1
+            rewards.append(amount)
             time.sleep(1)
             bal_after = get_bal(gf)
-            print(f"  S{session_id} {i+1}/{cycles}: +{amount} | {bal_before} -> {bal_after} | session_total={total}",
-                  flush=True)
+            print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}", flush=True)
             fail = 0
         else:
             fail += 1
             err = result.get('error', 'unknown')
-            print(f"  S{session_id} {i+1}/{cycles}: FAIL ({err}) | {bal_before}", flush=True)
+            print(f"  {i+1}: FAIL ({err}) | {bal_before}", flush=True)
 
         if fail >= 8:
-            print(f"  S{session_id}: Too many fails, dừng session.", flush=True)
+            print("  Too many fails, stopping session", flush=True)
             break
 
-        if i < cycles - 1:
+        if i < MAX_CYCLES - 1:
             time.sleep(DELAY)
 
-    return total, ok, fail
+    bal_end = get_bal(gf)
+    print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | balance {bal_start} -> {bal_end} | reward={total}",
+          flush=True)
+
+    # ===== ĐÓNG BROWSER — KHÔNG xoá cookie =====
+    print(f"[SESSION {session_id}] Đóng browser (giữ cookie)...", flush=True)
+    try:
+        browser.close()
+    except: pass
+
+    return total, ok, fail, True
 
 
 def main():
-    print(f"Config: CYCLES_PER_LOGIN={CYCLES_PER_LOGIN} DELAY={DELAY}s "
-          f"REST_AFTER_LOGOUT={REST_AFTER_LOGOUT}s MAX_RUNTIME={MAX_RUNTIME}s "
-          f"HEADLESS={HEADLESS}", flush=True)
+    print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
+          f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}", flush=True)
 
     try:
         fb_cookies = m.parse_cookie_header(FB_COOKIES)
@@ -288,28 +266,20 @@ def main():
                 break
 
             session_id += 1
-            print(f"\n########## SESSION {session_id} ##########", flush=True)
-
-            # ---------- MỞ BROWSER MỚI + NẠP LẠI COOKIE CŨ ----------
-            browser, context, page, gf = do_login(p, fb_cookies)
-            if browser is None:
-                print("[SESSION] Login fail — thoát job.", flush=True)
-                return 1
-
-            # ---------- CHẠY N CYCLES ----------
-            total, ok, fail = run_cycles(gf, CYCLES_PER_LOGIN, session_id, started_at)
+            total, ok, fail, cookies_ok = run_one_session(p, fb_cookies, session_id, started_at)
             grand_total += total
             grand_ok += ok
-            print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} reward={total}", flush=True)
 
-            # ---------- ĐÓNG BROWSER (giữ cookie) ----------
-            do_close(browser)
+            # Cookie hỏng → dừng job
+            if not cookies_ok:
+                print("[STOP] Cookie hết hạn — cần update FB_COOKIES secret.", flush=True)
+                break
 
-            # ---------- NGHỈ 60s ----------
+            # Nghỉ 60s rồi session mới
             if time.time() - started_at > MAX_RUNTIME:
                 break
-            print(f"[REST] Nghỉ {REST_AFTER_LOGOUT}s rồi mở browser mới...", flush=True)
-            time.sleep(REST_AFTER_LOGOUT)
+            print(f"[REST] Nghỉ {REST}s rồi mở session {session_id+1}...", flush=True)
+            time.sleep(REST)
 
         print("\n" + "=" * 60, flush=True)
         print(f"  TỔNG: {session_id} sessions | {grand_ok} claim ok | {grand_total} coin", flush=True)
