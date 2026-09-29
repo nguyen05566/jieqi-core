@@ -1,39 +1,65 @@
 name: Sam Loc Reward Bot
+
 on:
   schedule:
     - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       max_claims:
-        description: 'So lan claim toi da'
-        default: '1500'
+        description: 'So cycles moi session (roi dong browser)'
+        default: '30'
       cooldown:
-        description: 'Cooldown (giay)'
+        description: 'Nghi giua cac claim (giay)'
         default: '3'
+      rest_between_runs:
+        description: 'Nghi sau khi dong browser truoc khi mo lai (giay)'
+        default: '60'
+      max_runtime:
+        description: 'Tong thoi gian chay toi da (giay)'
+        default: '19800'
 
 jobs:
   claim:
     runs-on: ubuntu-latest
-    timeout-minutes: 340
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      
+
+      # Cache pip — khong tai lai package
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      # Cache Playwright browsers — khong tai lai Chromium (~150MB)
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium
+          restore-keys: playwright-${{ runner.os }}-
+
       - name: Install deps
         run: |
           pip install playwright
           npx playwright install chromium --with-deps
-      
+
       - name: Run bot
         env:
           FB_COOKIES: ${{ secrets.FB_COOKIES }}
-          MAX_CLAIMS: ${{ github.event.inputs.max_claims || '15' }}
+          MAX_CLAIMS: ${{ github.event.inputs.max_claims || '30' }}
           COOLDOWN: ${{ github.event.inputs.cooldown || '3' }}
+          REST_BETWEEN_RUNS: ${{ github.event.inputs.rest_between_runs || '60' }}
+          MAX_RUNTIME: ${{ github.event.inputs.max_runtime || '19800' }}
           HEADLESS: 'true'
         run: python3 sam_reward_bot_v3.py
-      
+
       - name: Screenshot on failure
         if: failure()
         uses: actions/upload-artifact@v4
