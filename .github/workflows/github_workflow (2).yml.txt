@@ -29,7 +29,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      # Cache pip — khong tai lai package
+      # Cache pip
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -37,7 +37,7 @@ jobs:
           key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: pip-${{ runner.os }}-
 
-      # Cache Playwright browsers — khong tai lai Chromium (~150MB)
+      # Cache Playwright browsers
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -52,13 +52,16 @@ jobs:
 
       - name: Run bot
         env:
-          FB_COOKIES: ${{ secrets.FB_COOKIES }}
           MAX_CLAIMS: ${{ github.event.inputs.max_claims || '30' }}
           COOLDOWN: ${{ github.event.inputs.cooldown || '3' }}
           REST_BETWEEN_RUNS: ${{ github.event.inputs.rest_between_runs || '60' }}
           MAX_RUNTIME: ${{ github.event.inputs.max_runtime || '19800' }}
           HEADLESS: 'true'
-        run: python3 sam_reward_bot_v3.py
+        run: |
+          echo "===== Cookie files tim thay trong repo ====="
+          ls -la ck*.txt 2>/dev/null || echo "KHONG co file ck*.txt nao!"
+          echo "============================================"
+          python3 sam_reward_bot_v3.py
 
       - name: Screenshot on failure
         if: failure()
