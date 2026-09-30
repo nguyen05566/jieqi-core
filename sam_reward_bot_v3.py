@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v8 — y như bản gốc, thêm vòng lặp:
-mở browser → login → 30 cycles → close → nghỉ 60s → lặp lại.
-Cookie KHÔNG bị xoá, dùng lại nguyên vẹn.
+"""FB Sam loc reward bot v9 — đọc cookie từ ck1.txt, ck2.txt, ck3.txt...
+Chạy vòng tròn: ck1 → ck2 → ckN → ck1 → ...
+Mỗi session: mở browser → login → MAX_CYCLES → close → nghỉ REST → cookie kế.
 """
-import os, sys, time
+import os, sys, time, glob, re
 
+# Thử import module bổ trợ nếu có (không bắt buộc)
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import board_dom_merged as m
-except:
-    pass
+except Exception:
+    m = None
 
 from playwright.sync_api import sync_playwright
-
-FB_COOKIES = os.environ.get("FB_COOKIES", "").strip()
-if not FB_COOKIES:
-    FB_COOKIES = "datr=Bu-naoV2DzYAsz945b81Jn1I; sb=Bu-nas9aEnxOeMtOfjOIAbRU; m_pixel_ratio=2; vpd=v1%3B616x360x2; c_user=61561542347462; xs=29%3ACFnA3wEH9B9D3A%3A2%3A1790554583%3A-1%3A-1; locale=en_GB; pas=100051928670915%3AdkPz2ivLwm%2C61561542347462%3AygtS8wYCm5; ps_l=1; ps_n=1; presence=C%7B%22t3%22%3A%5B%5D%2C%22utc3%22%3A1790621986752%2C%22v%22%3A1%7D; wd=360x616; fr=1ZgRRkYX1oP22NBXB.AWdhqJijw632suL5gyEWH6zdQJk2-HKqUlmlD2hniOm6xTA9ops.Bqp-8w..AAA.0.0.Bqurso.AWf_e7mTQsdpD5QFmU18288z6oM; fbl_st=101731726%3BT%3A29843708; wl_cbv=v2%3Bclient_version%3A3306%3Btimestamp%3A1790622504"
 
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
@@ -25,10 +22,77 @@ MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 
+# ============================================================
+# ĐỌC COOKIE TỪ FILE ck*.txt
+# ============================================================
+def load_all_cookie_sets(folder="."):
+    """
+    Quét mọi file ck*.txt, sắp xếp theo số tăng dần (ck1 < ck2 < ck10).
+    Trả về: [{"file": "ck1.txt", "raw": "datr=...; sb=...; ..."}, ...]
+    """
+    pattern = os.path.join(folder, "ck*.txt")
+    files = glob.glob(pattern)
+
+    def sort_key(path):
+        m = re.search(r'ck(\d+)\.txt$', os.path.basename(path))
+        return int(m.group(1)) if m else 999999
+
+    files.sort(key=sort_key)
+
+    cookie_sets = []
+    for path in files:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                content = fh.read().strip()
+            if not content:
+                print(f"[COOKIE] {path} rỗng, bỏ qua", flush=True)
+                continue
+            # Chuẩn hoá: bỏ nháy, gộp xuống dòng/tab, chuẩn hoá dấu ;
+            content = content.strip('"').strip("'")
+            content = " ".join(content.split())
+            content = content.replace(";  ", "; ").replace(" ;", ";")
+            cookie_sets.append({"file": os.path.basename(path), "raw": content})
+            print(f"[COOKIE] Nạp {os.path.basename(path)} "
+                  f"({len(content)} ký tự)", flush=True)
+        except Exception as e:
+            print(f"[COOKIE] Lỗi đọc {path}: {e}", flush=True)
+
+    return cookie_sets
+
+
+def parse_cookie(raw: str):
+    """Parse chuỗi cookie header thành list dict cho Playwright."""
+    raw = raw.strip().strip('"').strip("'")
+    raw = " ".join(raw.split())
+    raw = raw.replace(";  ", "; ").replace(" ;", ";")
+
+    # Ưu tiên dùng module bổ trợ nếu có
+    if m is not None and hasattr(m, "parse_cookie_header"):
+        try:
+            return m.parse_cookie_header(raw)
+        except Exception:
+            pass
+
+    # Fallback: http.cookies chuẩn
+    import http.cookies
+    parsed = http.cookies.SimpleCookie()
+    parsed.load(raw)
+    return [
+        {"name": n, "value": mv.value, "domain": ".facebook.com",
+         "path": "/", "secure": True, "httpOnly": False, "sameSite": "Lax"}
+        for n, mv in parsed.items() if n and mv.value
+    ]
+
+
+# ============================================================
+# HELPER
+# ============================================================
 def get_bal(gf):
     try:
-        return gf.evaluate("() => document.querySelector('.chipBalance')?.textContent.trim() || '?'")
-    except:
+        return gf.evaluate(
+            "() => document.querySelector('.chipBalance')?.textContent.trim() || '?'"
+        )
+    except Exception:
         return "?"
 
 
@@ -45,7 +109,8 @@ def trigger_and_claim(gf):
     """Y NGUYÊN mã gốc."""
     try:
         gf.evaluate("createTable()")
-    except: pass
+    except Exception:
+        pass
     time.sleep(2)
 
     try:
@@ -53,7 +118,8 @@ def trigger_and_claim(gf):
             const r = document.getElementById('radio_11');
             if (r) { r.checked = true; r.dispatchEvent(new Event('change', {bubbles: true})); }
         }""")
-    except: pass
+    except Exception:
+        pass
     time.sleep(0.5)
 
     try:
@@ -61,7 +127,8 @@ def trigger_and_claim(gf):
             const b = document.querySelector('input[name="CREATE"]');
             if (b) b.click();
         }""")
-    except: pass
+    except Exception:
+        pass
     time.sleep(3)
 
     alert_clicked = False
@@ -82,7 +149,8 @@ def trigger_and_claim(gf):
             }
             return false;
         }""")
-    except: pass
+    except Exception:
+        pass
 
     if alert_clicked:
         time.sleep(2)
@@ -131,8 +199,12 @@ def trigger_and_claim(gf):
     return result
 
 
+# ============================================================
+# SESSION
+# ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at):
-    """Mở browser mới → login → chạy MAX_CYCLES → close. Trả (total, ok, fail, cookies_still_ok)."""
+    """Mở browser → login → MAX_CYCLES → close.
+    Trả về (total, ok, fail, cookies_ok)."""
     print(f"\n########## SESSION {session_id} ##########", flush=True)
 
     browser = p.chromium.launch(
@@ -146,45 +218,86 @@ def run_one_session(p, fb_cookies, session_id, started_at):
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
     )
-    for c in fb_cookies:
-        c['domain'] = '.facebook.com'
-    context.add_cookies(fb_cookies)
+
+    try:
+        for c in fb_cookies:
+            c['domain'] = '.facebook.com'
+        context.add_cookies(fb_cookies)
+    except Exception as e:
+        print(f"  ERROR add_cookies: {e}", flush=True)
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, False
+
     page = context.new_page()
 
-    # ===== Y NGUYÊN mã gốc =====
+    # ===== Login check =====
     print("[1] Login FB...", flush=True)
-    page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(5000)
-    if page.locator('input[placeholder="Email or phone"]').count() > 0:
-        print("  ERROR: Not logged in", flush=True)
-        browser.close()
+    try:
+        page.goto("https://www.facebook.com/",
+                  wait_until="domcontentloaded", timeout=30000)
+    except Exception as e:
+        print(f"  ERROR goto FB: {e}", flush=True)
+        try:
+            browser.close()
+        except Exception:
+            pass
         return 0, 0, 0, False
+
+    page.wait_for_timeout(5000)
+
+    try:
+        if page.locator('input[placeholder="Email or phone"]').count() > 0:
+            print("  ERROR: Not logged in (cookie hết hạn?)", flush=True)
+            browser.close()
+            return 0, 0, 0, False
+    except Exception:
+        pass
     print("  OK", flush=True)
 
+    # ===== Open game =====
     print("[2] Open game...", flush=True)
-    page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
+    try:
+        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
+    except Exception as e:
+        print(f"  ERROR goto game: {e}", flush=True)
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, True
+
     page.wait_for_timeout(20000)
     gf = find_gf(page, max_wait=60)
     if not gf:
         print("  ERROR: Game frame not found", flush=True)
-        browser.close()
+        try:
+            browser.close()
+        except Exception:
+            pass
         return 0, 0, 0, True
     print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
+    # ===== Wait WS =====
     print("[3] Wait WS...", flush=True)
     for _ in range(10):
         try:
-            if gf.evaluate("() => window.connection && connection.ws && connection.ws.readyState === 1"):
+            if gf.evaluate(
+                "() => window.connection && connection.ws && connection.ws.readyState === 1"
+            ):
                 print("  WS connected", flush=True)
                 break
-        except: pass
+        except Exception:
+            pass
         time.sleep(3)
 
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
 
-    # ===== Vòng claim — y nguyên mã gốc =====
+    # ===== Reward loop =====
     print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
     total = 0
     ok = 0
@@ -199,10 +312,19 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         bal_before = get_bal(gf)
         try:
             gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
-        except: pass
+        except Exception:
+            pass
         time.sleep(1)
 
-        result = trigger_and_claim(gf)
+        try:
+            result = trigger_and_claim(gf)
+        except Exception as e:
+            print(f"  {i+1}: EXCEPTION ({e})", flush=True)
+            fail += 1
+            if fail >= 8:
+                break
+            time.sleep(DELAY)
+            continue
 
         if result.get('success') and result.get('amount', 0) > 0:
             amount = result['amount']
@@ -211,7 +333,8 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             rewards.append(amount)
             time.sleep(1)
             bal_after = get_bal(gf)
-            print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}", flush=True)
+            print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}",
+                  flush=True)
             fail = 0
         else:
             fail += 1
@@ -226,63 +349,94 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             time.sleep(DELAY)
 
     bal_end = get_bal(gf)
-    print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | balance {bal_start} -> {bal_end} | reward={total}",
-          flush=True)
+    print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
+          f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
 
-    # ===== ĐÓNG BROWSER — KHÔNG xoá cookie =====
     print(f"[SESSION {session_id}] Đóng browser (giữ cookie)...", flush=True)
     try:
         browser.close()
-    except: pass
+    except Exception:
+        pass
 
     return total, ok, fail, True
 
 
+# ============================================================
+# MAIN
+# ============================================================
 def main():
     print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
           f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}", flush=True)
 
-    try:
-        fb_cookies = m.parse_cookie_header(FB_COOKIES)
-    except:
-        import http.cookies
-        parsed = http.cookies.SimpleCookie()
-        parsed.load(FB_COOKIES)
-        fb_cookies = [
-            {"name": n, "value": mv.value, "domain": ".facebook.com",
-             "path": "/", "secure": True, "httpOnly": False, "sameSite": "Lax"}
-            for n, mv in parsed.items() if n and mv.value
-        ]
+    cookie_sets = load_all_cookie_sets()
+    if not cookie_sets:
+        print("[STOP] Không tìm thấy file ck*.txt nào trong repo.", flush=True)
+        return 1
+
+    print(f"\nTìm thấy {len(cookie_sets)} bộ cookie: "
+          f"{[c['file'] for c in cookie_sets]}", flush=True)
 
     started_at = time.time()
     grand_total = 0
     grand_ok = 0
     session_id = 0
+    cookie_idx = 0
 
     with sync_playwright() as p:
         while True:
             if time.time() - started_at > MAX_RUNTIME:
-                print(f"\n[TIME UP] Đã chạy {int(time.time()-started_at)}s, thoát.", flush=True)
+                print(f"\n[TIME UP] Đã chạy {int(time.time()-started_at)}s, thoát.",
+                      flush=True)
                 break
 
+            entry = cookie_sets[cookie_idx % len(cookie_sets)]
+            round_no = cookie_idx // len(cookie_sets) + 1
+            cookie_idx += 1
+
+            print(f"\n{'='*60}", flush=True)
+            print(f">>> COOKIE: {entry['file']}  |  vòng {round_no}  "
+                  f"|  lượt #{cookie_idx}", flush=True)
+            print(f"{'='*60}", flush=True)
+
+            fb_cookies = parse_cookie(entry["raw"])
+            if not fb_cookies:
+                print(f"[WARN] {entry['file']} parse rỗng, bỏ qua.", flush=True)
+                continue
+
             session_id += 1
-            total, ok, fail, cookies_ok = run_one_session(p, fb_cookies, session_id, started_at)
+            try:
+                total, ok, fail, cookies_ok = run_one_session(
+                    p, fb_cookies, session_id, started_at
+                )
+            except Exception as e:
+                print(f"[ERROR] session {session_id}: {e}", flush=True)
+                total, ok, fail, cookies_ok = 0, 0, 0, False
+
             grand_total += total
             grand_ok += ok
 
-            # Cookie hỏng → dừng job
             if not cookies_ok:
-                print("[STOP] Cookie hết hạn — cần update FB_COOKIES secret.", flush=True)
-                break
+                print(f"[WARN] Cookie {entry['file']} hết hạn — bỏ qua, "
+                      f"chuyển cookie kế tiếp.", flush=True)
+                continue
 
-            # Nghỉ 60s rồi session mới
             if time.time() - started_at > MAX_RUNTIME:
                 break
-            print(f"[REST] Nghỉ {REST}s rồi mở session {session_id+1}...", flush=True)
-            time.sleep(REST)
+
+            # Hết 1 vòng cookie?
+            if cookie_idx % len(cookie_sets) == 0:
+                print(f"[CYCLE] Đã xong vòng {round_no} với "
+                      f"{len(cookie_sets)} cookie. Nghỉ {REST}s rồi lặp lại...",
+                      flush=True)
+                time.sleep(REST)
+            else:
+                next_file = cookie_sets[cookie_idx % len(cookie_sets)]['file']
+                print(f"[REST] Nghỉ {REST}s rồi sang {next_file}...", flush=True)
+                time.sleep(REST)
 
         print("\n" + "=" * 60, flush=True)
-        print(f"  TỔNG: {session_id} sessions | {grand_ok} claim ok | {grand_total} coin", flush=True)
+        print(f"  TỔNG: {session_id} sessions | {grand_ok} claim ok | "
+              f"{grand_total} coin", flush=True)
         print(f"  Thời gian: {int(time.time()-started_at)}s", flush=True)
         print("=" * 60, flush=True)
 
