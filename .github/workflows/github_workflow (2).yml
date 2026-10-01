@@ -13,7 +13,7 @@ on:
         default: '3'
       rest_between_runs:
         description: 'Nghi sau khi dong browser truoc khi mo lai (giay)'
-        default: '60'
+        default: '6'
       max_runtime:
         description: 'Tong thoi gian chay toi da (giay)'
         default: '19800'
