@@ -26,6 +26,10 @@ HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
+# ============ ADDED: SINGLE_COOKIE_FILE for parallel runs ============
+# Nếu set, bot chỉ dùng 1 cookie file này (skip cycle) — để chạy song song N processes
+SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "")
+
 
 # ============================================================
 # ĐỌC COOKIE TỪ FILE ck*.txt
@@ -466,8 +470,27 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 def main():
     print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
           f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}", flush=True)
+    if SINGLE_COOKIE_FILE:
+        print(f"Config: SINGLE_COOKIE_FILE={SINGLE_COOKIE_FILE} (parallel mode — chỉ chạy 1 cookie)", flush=True)
 
-    cookie_sets = load_all_cookie_sets()
+    if SINGLE_COOKIE_FILE:
+        # Parallel mode: chỉ load 1 cookie file cụ thể
+        if not os.path.exists(SINGLE_COOKIE_FILE):
+            print(f"[STOP] SINGLE_COOKIE_FILE không tồn tại: {SINGLE_COOKIE_FILE}", flush=True)
+            return 1
+        with open(SINGLE_COOKIE_FILE, "r", encoding="utf-8") as fh:
+            content = fh.read().strip()
+        if not content:
+            print(f"[STOP] {SINGLE_COOKIE_FILE} rỗng", flush=True)
+            return 1
+        content = content.strip('"').strip("'")
+        content = " ".join(content.split())
+        content = content.replace(";  ", "; ").replace(" ;", ";")
+        cookie_sets = [{"file": os.path.basename(SINGLE_COOKIE_FILE), "raw": content}]
+        print(f"[SINGLE] Nạp {SINGLE_COOKIE_FILE} ({len(content)} ký tự)", flush=True)
+    else:
+        cookie_sets = load_all_cookie_sets()
+
     if not cookie_sets:
         print("[STOP] Không tìm thấy file ck*.txt nào trong repo.", flush=True)
         return 1
@@ -481,8 +504,12 @@ def main():
     session_id = 0
     cookie_idx = 0
 
+    # Parallel mode: chỉ chạy 1 session (cho 1 cookie), rồi exit
+    # Sequential mode: loop qua tất cả cookies, cycle vô hạn
+    max_iterations = 1 if SINGLE_COOKIE_FILE else 10**9
+
     with sync_playwright() as p:
-        while True:
+        while cookie_idx < max_iterations:
             if time.time() - started_at > MAX_RUNTIME:
                 print(f"\n[TIME UP] Đã chạy {int(time.time()-started_at)}s, thoát.",
                       flush=True)
