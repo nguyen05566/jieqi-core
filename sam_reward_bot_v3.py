@@ -17,7 +17,7 @@ from playwright.sync_api import sync_playwright
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
 DELAY = float(os.environ.get("COOLDOWN", "3"))
-REST = int(os.environ.get("REST_BETWEEN_RUNS", "60"))
+REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
@@ -96,7 +96,7 @@ def get_bal(gf):
         return "?"
 
 
-def find_gf(page, max_wait=60):
+def find_gf(page, max_wait=10):
     for _ in range(max_wait // 5):
         for f in page.frames:
             if "instant-bundle" in f.url and "fbsbx.com" in f.url:
