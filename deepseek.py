@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Sâm Lốc Farmer Bot v9.2
+"""Sâm Lốc Farmer Bot v9.3
+
+Fix v9.3:
+  - Bỏ regex escape \\s+ (gây SyntaxError: missing ) after argument list)
+  - Tìm nút Watch trong dialog bằng cách quét MỌI element
+    (div, span, ...) — vì nút Watch không phải <button>/<input>
+  - In debug chi tiết khi không tìm thấy nút Watch
 
 Flow mỗi session (1 cookie):
   1. Login FB
   2. Open Sâm Lốc
-  3. Claim N video rewards (không tạo bàn thật — luôn chọn bet 25000)
-  4. Vào bàn 'fffff' của Hub + nhập password
+  3. Claim N video rewards (không tạo bàn thật — luôn chọn bet cao nhất)
+  4. Vào bàn 'fffff' + nhập password
   5. Báo sâm → thua → xu chuyển sang Hub
   6. Đóng browser, nghỉ REST, sang cookie kế
-
-Cookie đọc từ ck1.txt, ck2.txt, ck3.txt... (giống sam_reward_bot_v3.py)
 """
 import os, sys, time, glob, re, http.cookies
 
@@ -36,10 +40,9 @@ SKIP_CLAIM = os.environ.get("SKIP_CLAIM", "false").lower() == "true"
 
 
 # ============================================================
-# COOKIE — ĐỌC TỪ ck*.txt
+# COOKIE
 # ============================================================
 def load_all_cookie_sets(folder="."):
-    """Quét mọi file ck*.txt, sắp xếp theo số tăng dần."""
     pattern = os.path.join(folder, "ck*.txt")
     files = glob.glob(pattern)
 
@@ -70,7 +73,6 @@ def load_all_cookie_sets(folder="."):
 
 
 def parse_cookies(raw: str):
-    """Parse chuỗi cookie header → list dict cho Playwright."""
     raw = raw.strip().strip('"').strip("'")
     raw = " ".join(raw.split())
     raw = raw.replace(";  ", "; ").replace(" ;", ";")
@@ -94,7 +96,6 @@ def parse_cookies(raw: str):
 # HELPERS
 # ============================================================
 def parse_balance_to_int(s):
-    """'10.3k' / '2500' / '1,200' → int."""
     if s is None:
         return 0
     s = str(s).replace(',', '').replace('.', '').strip()
@@ -126,7 +127,6 @@ def get_vi(gf):
 
 
 def find_gf(page, max_wait=120):
-    """Tìm frame game thật (instant-bundle)."""
     for _ in range(max_wait // 5):
         for f in page.frames:
             if "instant-bundle" in f.url:
@@ -135,45 +135,10 @@ def find_gf(page, max_wait=120):
     return None
 
 
-def wait_ws(gf, max_wait=60):
-    """Đợi WS ready, click RECONNECT nếu cần."""
-    for _ in range(max_wait // 3):
-        try:
-            if gf.evaluate(
-                "() => window.connection && connection.ws && "
-                "connection.ws.readyState === 1"
-            ):
-                return True
-        except Exception:
-            pass
-        try:
-            gf.evaluate("""() => {
-                const txt = document.body?.innerText || '';
-                if (txt.includes('Connection to server has been broken') ||
-                    txt.includes('RECONNECT')) {
-                    const btns = document.querySelectorAll(
-                        'input[type="button"], button, a');
-                    for (const b of btns) {
-                        const t = (b.value || b.textContent || '')
-                            .toLowerCase().trim();
-                        if (t === 'reconnect' || t.includes('kết nối lại')) {
-                            b.click();
-                            return;
-                        }
-                    }
-                }
-            }""")
-        except Exception:
-            pass
-        time.sleep(3)
-    return False
-
-
 # ============================================================
 # OPEN GAME
 # ============================================================
 def open_sam_loc(page, label=""):
-    """Mở Sâm Lốc với retry. Trả về (gf, ok)."""
     print(f"[{label}] Open Sâm Lốc...", flush=True)
     page.goto(SAM_LOC_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(30000)
@@ -194,7 +159,6 @@ def open_sam_loc(page, label=""):
 
     if not gf:
         print(f"[{label}] No game frame after 15 rounds", flush=True)
-        # DEBUG
         print(f"[{label}] --- DEBUG frames ---", flush=True)
         for f in page.frames:
             print(f"    {f.url[:140]}", flush=True)
@@ -202,15 +166,13 @@ def open_sam_loc(page, label=""):
         try:
             page.screenshot(path="/tmp/farmer_game_load_failed.png",
                             full_page=False)
-            print(f"[{label}] --- screenshot: /tmp/farmer_game_load_failed.png",
-                  flush=True)
+            print(f"[{label}] --- screenshot saved", flush=True)
         except Exception as e:
             print(f"[{label}] --- screenshot fail: {e}", flush=True)
         return None, False
 
     page.wait_for_timeout(20000)
 
-    # Check WS + click RECONNECT nếu cần
     for attempt in range(5):
         try:
             ws_state = gf.evaluate(
@@ -227,7 +189,7 @@ def open_sam_loc(page, label=""):
                     if (b.offsetParent === null) continue;
                     const t = (b.value || b.textContent || '')
                         .toLowerCase().trim();
-                    if (t === 'reconnect' || t.includes('kết nối lại')) {
+                    if (t === 'reconnect' || t.indexOf('kết nối lại') >= 0) {
                         b.click();
                         return;
                     }
@@ -240,7 +202,6 @@ def open_sam_loc(page, label=""):
             print(f"[{label}] WS check error: {e}", flush=True)
             time.sleep(5)
 
-    # Last resort: reload
     print(f"[{label}] WS failed, reloading...", flush=True)
     try:
         page.reload(wait_until="domcontentloaded", timeout=30000)
@@ -265,10 +226,9 @@ def open_sam_loc(page, label=""):
 
 
 # ============================================================
-# CLAIM VIDEO REWARDS (không tạo bàn thật)
+# CLAIM VIDEO REWARDS
 # ============================================================
 def _cancel_form(gf):
-    """Đóng form tạo bàn nếu đang mở."""
     try:
         gf.evaluate("""() => {
             const btns = document.querySelectorAll(
@@ -290,7 +250,6 @@ def _cancel_form(gf):
 
 
 def _try_cancel_table(gf):
-    """Cố huỷ bàn vừa tạo thật (chỉ khi balance ≥ 25000)."""
     try:
         result = gf.evaluate("""() => {
             if (typeof cancelTable === 'function') {
@@ -319,7 +278,8 @@ def _try_cancel_table(gf):
                 const t = (b.value || b.textContent || '')
                     .toLowerCase().trim();
                 if (t === 'leave' || t === 'thoát' || t === 'rời' ||
-                    t.includes('leave table') || t.includes('rời bàn')) {
+                    t.indexOf('leave table') >= 0 ||
+                    t.indexOf('rời bàn') >= 0) {
                     b.click();
                     return t;
                 }
@@ -337,10 +297,16 @@ def _try_cancel_table(gf):
     return False
 
 
+def _normalize_text(s):
+    """Chuẩn hoá text trong Python (không dùng regex escape trong JS)."""
+    return " ".join(str(s).split())
+
+
 def claim_video_rewards(gf, max_claims=10):
     """
-    Claim VIDEO_REWARD. Luôn chọn mức cược cao nhất (25000) để
-    server trả dialog 'not enough coin' → không tạo bàn thật.
+    Claim VIDEO_REWARD. Luôn chọn bet cao nhất để server trả dialog
+    'not enough coin' → không tạo bàn thật.
+    Tìm nút Watch trong dialog bằng cách quét MỌI element.
     """
     print(f"\n[FARMER] Claiming {max_claims} video rewards...", flush=True)
     total = 0
@@ -356,14 +322,14 @@ def claim_video_rewards(gf, max_claims=10):
                 pass
             time.sleep(1)
 
-            # Mở form
+            # Mở form tạo bàn
             try:
                 gf.evaluate("createTable()")
             except Exception:
                 pass
             time.sleep(2)
 
-            # Chọn mức cược cao nhất (radio cuối)
+            # Chọn bet cao nhất (radio cuối) — KHÔNG dùng regex escape
             picked = gf.evaluate("""() => {
                 const radios = document.querySelectorAll(
                     'input[type="radio"][name="betAmt"]');
@@ -373,16 +339,27 @@ def claim_video_rewards(gf, max_claims=10):
                 const last = radios[radios.length - 1];
                 last.checked = true;
                 last.dispatchEvent(new Event('change', {bubbles: true}));
-                const val = parseInt(
-                    String(last.value).replace(/[^0-9]/g, '')) || 0;
-                const allLevels = Array.from(radios).map(r =>
-                    parseInt(String(r.value).replace(/[^0-9]/g, '')) || 0
-                );
+
+                function toInt(v) {
+                    const s = String(v || '');
+                    let out = '';
+                    for (let k = 0; k < s.length; k++) {
+                        const c = s.charCodeAt(k);
+                        if (c >= 48 && c <= 57) out += s[k];
+                    }
+                    return parseInt(out) || 0;
+                }
+
+                const val = toInt(last.value);
+                const allLevels = [];
+                for (let k = 0; k < radios.length; k++) {
+                    allLevels.push(toInt(radios[k].value));
+                }
                 return {ok: true, picked: val, levels: allLevels};
             }""")
 
             if not picked.get('ok'):
-                print(f"  {i+1:3d}: Không có radio betAmt → skip", flush=True)
+                print(f"  {i+1:3d}: Không có radio betAmt", flush=True)
                 fails += 1
                 if fails >= MAX_FAILS:
                     break
@@ -406,28 +383,99 @@ def claim_video_rewards(gf, max_claims=10):
                 pass
             time.sleep(3)
 
-            # Kiểm tra dialog 'not enough coin' + click Watch
+            # ==== Tìm dialog + nút Watch — QUÉT MỌI ELEMENT ====
+            # Không dùng regex escape, dùng indexOf và split
             dialog_state = gf.evaluate("""() => {
-                const ds = document.querySelectorAll('[class*="msgBox"]');
-                for (const d of ds) {
+                function cleanText(s) {
+                    return String(s || '').split(' ').filter(function(p) {
+                        return p.length > 0;
+                    }).join(' ');
+                }
+
+                const ds = document.querySelectorAll(
+                    '[class*="msgBox"], [class*="dialog"], [class*="Dialog"]');
+                for (let di = 0; di < ds.length; di++) {
+                    const d = ds[di];
                     if (d.offsetParent === null) continue;
-                    const txt = (d.textContent || '').toLowerCase();
-                    if (txt.includes('enough coin') ||
-                        txt.includes('không đủ') ||
-                        txt.includes('not enough')) {
-                        const bs = d.querySelectorAll(
-                            'input[type="button"], button, a');
-                        for (const b of bs) {
-                            const val = (b.value || b.textContent || '')
-                                .toLowerCase();
-                            if (val.includes('watch') || val.includes('xem')) {
-                                b.click();
-                                return {dialog: true, watch_clicked: true};
+                    const txt = cleanText(d.textContent).toLowerCase();
+
+                    const hasEnough = txt.indexOf('enough coin') >= 0 ||
+                                      txt.indexOf('không đủ') >= 0 ||
+                                      txt.indexOf('khong du') >= 0 ||
+                                      txt.indexOf('not enough') >= 0 ||
+                                      txt.indexOf('watch') >= 0 ||
+                                      txt.indexOf('xem video') >= 0 ||
+                                      txt.indexOf('xem quảng cáo') >= 0;
+                    if (!hasEnough) continue;
+
+                    const allEls = d.querySelectorAll('*');
+                    const debugList = [];
+                    let watchClicked = null;
+
+                    for (let k = 0; k < allEls.length; k++) {
+                        const el = allEls[k];
+                        if (el.offsetParent === null) continue;
+
+                        const elText = cleanText(el.textContent).trim();
+                        const elVal = String(el.value || '').trim();
+                        const elTitle = String(el.title || '').trim();
+                        const elAria = String(el.getAttribute('aria-label') || '').trim();
+                        const elCls = String(el.className || '').toLowerCase();
+                        const combined = (elText + ' ' + elVal + ' ' +
+                                          elTitle + ' ' + elAria).toLowerCase();
+
+                        if (el.children.length === 0 && elText.length > 0 &&
+                            elText.length < 60) {
+                            debugList.push({
+                                tag: el.tagName,
+                                text: elText.substring(0, 40),
+                                cls: elCls.substring(0, 40)
+                            });
+                        }
+
+                        if (el.children.length > 3) continue;
+
+                        const isWatch = combined.indexOf('watch') >= 0 ||
+                                        combined.indexOf('xem video') >= 0 ||
+                                        combined.indexOf('xem quảng cáo') >= 0 ||
+                                        combined.indexOf('xem quang cao') >= 0 ||
+                                        combined.indexOf('nhận thưởng') >= 0 ||
+                                        combined.indexOf('nhan thuong') >= 0 ||
+                                        elCls.indexOf('watch') >= 0;
+
+                        if (!isWatch) continue;
+
+                        if (el.children.length === 0 ||
+                            el.tagName === 'BUTTON' ||
+                            el.tagName === 'INPUT' ||
+                            el.tagName === 'A') {
+                            try {
+                                el.click();
+                                watchClicked = {
+                                    tag: el.tagName,
+                                    text: elText.substring(0, 40),
+                                    cls: elCls.substring(0, 40)
+                                };
+                                break;
+                            } catch (e) {
+                                // thử element tiếp
                             }
                         }
-                        return {dialog: true, watch_clicked: false,
-                                snippet: txt.substring(0, 100)};
                     }
+
+                    if (watchClicked) {
+                        return {
+                            dialog: true,
+                            watch_clicked: true,
+                            clicked: watchClicked
+                        };
+                    }
+                    return {
+                        dialog: true,
+                        watch_clicked: false,
+                        snippet: txt.substring(0, 250),
+                        debug: debugList.slice(0, 30)
+                    };
                 }
                 return {dialog: false};
             }""")
@@ -443,14 +491,22 @@ def claim_video_rewards(gf, max_claims=10):
                 continue
 
             if not dialog_state.get('watch_clicked'):
-                print(f"  {i+1:3d}: Dialog hiện nhưng không có nút Watch "
-                      f"→ skip", flush=True)
+                print(f"  {i+1:3d}: Dialog hiện, KHÔNG có nút Watch. "
+                      f"Debug:", flush=True)
+                snip = dialog_state.get('snippet', '')
+                print(f"      Snippet: {snip[:200]}", flush=True)
+                for d in dialog_state.get('debug', [])[:25]:
+                    print(f"      [{d.get('tag', ''):6s}] "
+                          f"'{d.get('text', '')[:45]}' "
+                          f"cls='{d.get('cls', '')[:30]}'", flush=True)
                 fails += 1
                 if fails >= MAX_FAILS:
                     break
                 time.sleep(DELAY)
                 continue
 
+            print(f"  {i+1:3d}: Clicked Watch: {dialog_state.get('clicked')}",
+                  flush=True)
             time.sleep(1)
 
             # Gửi WS VIDEO_REWARD
@@ -543,10 +599,9 @@ def claim_video_rewards(gf, max_claims=10):
 
 
 # ============================================================
-# FIND + JOIN TABLE
+# FIND + JOIN TABLE — bản sửa không dùng regex escape
 # ============================================================
 def find_and_join_table(gf, page, table_name, password):
-    """Tìm bàn theo tên trong lobby, click, nhập password, Play."""
     print(f"\n[FARMER] Looking for table '{table_name}'...", flush=True)
 
     try:
@@ -557,15 +612,23 @@ def find_and_join_table(gf, page, table_name, password):
 
     # Click "Find table"
     clicked = gf.evaluate("""() => {
+        function cleanText(s) {
+            return String(s || '').split(' ').filter(function(p) {
+                return p.length > 0;
+            }).join(' ');
+        }
         const all = document.querySelectorAll(
-            'a, button, input[type="button"], [role="button"], '
-            '[onclick], [class*="btn"]');
-        for (const el of all) {
+            'a, button, input[type="button"], [role="button"], ' +
+            '[onclick], [class*="btn"], div, span');
+        for (let k = 0; k < all.length; k++) {
+            const el = all[k];
             if (el.offsetParent === null) continue;
-            const txt = (el.textContent || el.value || '')
+            if (el.children.length > 2) continue;
+            const txt = cleanText(el.textContent || el.value || '')
                 .trim().toLowerCase();
             if (txt === 'find table' || txt === 'tìm bàn' ||
-                txt.includes('find table') || txt.includes('tìm bàn')) {
+                txt.indexOf('find table') >= 0 ||
+                txt.indexOf('tìm bàn') >= 0) {
                 el.click();
                 return {clicked: true, text: txt, tag: el.tagName};
             }
@@ -575,27 +638,34 @@ def find_and_join_table(gf, page, table_name, password):
     print(f"  Clicked Find table: {clicked}", flush=True)
     time.sleep(3)
 
-    # Scroll + tìm Nam Quan roomCard
+    # Cuộn lên đầu
     gf.evaluate("""() => {
         const cs = document.querySelectorAll(
-            '[class*="list"], [class*="table"], [class*="lobby"], '
+            '[class*="list"], [class*="table"], [class*="lobby"], ' +
             '[class*="content"], [class*="scroll"], [class*="room"]');
-        for (const c of cs) {
+        for (let k = 0; k < cs.length; k++) {
+            const c = cs[k];
             if (c.scrollHeight > c.clientHeight) c.scrollTop = 0;
         }
     }""")
     time.sleep(2)
 
+    # Tìm Nam Quan roomCard
     nam_quan_clicked = False
     for scroll_round in range(30):
         nam_quan_pos = gf.evaluate("""() => {
+            function cleanText(s) {
+                return String(s || '').split(' ').filter(function(p) {
+                    return p.length > 0;
+                }).join(' ');
+            }
             const cards = document.querySelectorAll(
                 'a.roomCard, [class*="roomCard"]');
-            for (const el of cards) {
+            for (let k = 0; k < cards.length; k++) {
+                const el = cards[k];
                 if (el.offsetParent === null) continue;
-                const txt = (el.textContent || '')
-                    .replace(/\\s+/g, ' ').toLowerCase();
-                if (txt.startsWith('nam quan') || txt === 'nam quan') {
+                const txt = cleanText(el.textContent).trim().toLowerCase();
+                if (txt.indexOf('nam quan') === 0 || txt === 'nam quan') {
                     const rect = el.getBoundingClientRect();
                     if (rect.width > 20 && rect.height > 10) {
                         return {found: true,
@@ -615,9 +685,10 @@ def find_and_join_table(gf, page, table_name, password):
                         break
                 if frame:
                     frame_rect = frame.evaluate("""() => {
-                        const rect = window.frameElement?.getBoundingClientRect()
-                                     || {x: 0, y: 0};
-                        return {x: rect.x, y: rect.y};
+                        const r = window.frameElement
+                            ? window.frameElement.getBoundingClientRect()
+                            : {x: 0, y: 0};
+                        return {x: r.x, y: r.y};
                     }""")
                     abs_x = nam_quan_pos['x'] + frame_rect.get('x', 0)
                     abs_y = nam_quan_pos['y'] + frame_rect.get('y', 0)
@@ -630,9 +701,10 @@ def find_and_join_table(gf, page, table_name, password):
 
         gf.evaluate("""() => {
             const cs = document.querySelectorAll(
-                '[class*="list"], [class*="table"], [class*="lobby"], '
+                '[class*="list"], [class*="table"], [class*="lobby"], ' +
                 '[class*="content"], [class*="scroll"], [class*="room"]');
-            for (const c of cs) {
+            for (let k = 0; k < cs.length; k++) {
+                const c = cs[k];
                 if (c.scrollHeight > c.clientHeight) c.scrollTop += 150;
             }
         }""")
@@ -641,18 +713,25 @@ def find_and_join_table(gf, page, table_name, password):
     print(f"  Nam Quan clicked: {nam_quan_clicked}", flush=True)
     time.sleep(3)
 
-    # Search 'fffff' trong các tab
+    # Search bàn 'fffff'
     for tab_name in ['all', 'available', 'waiting']:
         gf.evaluate("""(tabName) => {
+            function cleanText(s) {
+                return String(s || '').split(' ').filter(function(p) {
+                    return p.length > 0;
+                }).join(' ');
+            }
             const all = document.querySelectorAll(
-                'a, button, input[type="button"], [role="button"], '
+                'a, button, input[type="button"], [role="button"], ' +
                 '[class*="btn"], div, span');
-            for (const el of all) {
+            for (let k = 0; k < all.length; k++) {
+                const el = all[k];
                 if (el.offsetParent === null) continue;
-                const txt = (el.textContent || el.value || '')
+                if (el.children.length > 2) continue;
+                const txt = cleanText(el.textContent || el.value || '')
                     .trim().toLowerCase();
                 if (txt === tabName ||
-                    (txt.length < 15 && txt.includes(tabName))) {
+                    (txt.length < 15 && txt.indexOf(tabName) >= 0)) {
                     el.click();
                     return;
                 }
@@ -663,9 +742,10 @@ def find_and_join_table(gf, page, table_name, password):
         for _ in range(10):
             gf.evaluate("""() => {
                 const cs = document.querySelectorAll(
-                    '[class*="list"], [class*="table"], '
+                    '[class*="list"], [class*="table"], ' +
                     '[class*="lobby"], [class*="content"]');
-                for (const c of cs) {
+                for (let k = 0; k < cs.length; k++) {
+                    const c = cs[k];
                     if (c.scrollHeight > c.clientHeight)
                         c.scrollTop = c.scrollHeight;
                 }
@@ -674,14 +754,20 @@ def find_and_join_table(gf, page, table_name, password):
             time.sleep(1)
 
         found_check = gf.evaluate("""(targetName) => {
+            function cleanText(s) {
+                return String(s || '').split(' ').filter(function(p) {
+                    return p.length > 0;
+                }).join(' ');
+            }
             const all = document.querySelectorAll('*');
-            const lt = targetName.toLowerCase();
-            for (const el of all) {
+            const lt = String(targetName).toLowerCase();
+            for (let k = 0; k < all.length; k++) {
+                const el = all[k];
                 if (el.offsetParent === null) continue;
                 if (el.children.length > 5) continue;
-                const txt = (el.textContent || '').trim();
+                const txt = cleanText(el.textContent).trim();
                 if (txt.length > 0 && txt.length < 80 &&
-                    txt.toLowerCase().includes(lt)) {
+                    txt.toLowerCase().indexOf(lt) >= 0) {
                     return {found: true, text: txt.substring(0, 60)};
                 }
             }
@@ -693,15 +779,21 @@ def find_and_join_table(gf, page, table_name, password):
 
     # Click bàn
     clicked_table = gf.evaluate("""(targetName) => {
+        function cleanText(s) {
+            return String(s || '').split(' ').filter(function(p) {
+                return p.length > 0;
+            }).join(' ');
+        }
         const all = document.querySelectorAll('*');
-        const lt = targetName.toLowerCase();
+        const lt = String(targetName).toLowerCase();
         const candidates = [];
-        for (const el of all) {
+        for (let k = 0; k < all.length; k++) {
+            const el = all[k];
             if (el.offsetParent === null) continue;
             if (el.children.length > 5) continue;
-            const txt = (el.textContent || '').trim();
+            const txt = cleanText(el.textContent).trim();
             if (txt.length > 0 && txt.length < 80 &&
-                txt.toLowerCase().includes(lt)) {
+                txt.toLowerCase().indexOf(lt) >= 0) {
                 candidates.push(el);
             }
         }
@@ -709,7 +801,8 @@ def find_and_join_table(gf, page, table_name, password):
             try {
                 candidates[0].click();
                 return {clicked: true,
-                        text: candidates[0].textContent?.trim().substring(0, 60)};
+                        text: cleanText(candidates[0].textContent)
+                            .trim().substring(0, 60)};
             } catch (e) {
                 return {clicked: false, error: e.toString()};
             }
@@ -719,10 +812,10 @@ def find_and_join_table(gf, page, table_name, password):
     print(f"  Clicked table: {clicked_table}", flush=True)
     time.sleep(5)
 
-    # Nhập password nếu dialog hiện
+    # Nhập password
     has_password_input = gf.evaluate("""() => {
         const dialog = document.querySelector(
-            '.msgBoxBackGround, [class*="msgBox"], '
+            '.msgBoxBackGround, [class*="msgBox"], ' +
             '[class*="dialog"], [class*="Dialog"]');
         if (!dialog) return {found: false};
         const inputs = dialog.querySelectorAll(
@@ -734,14 +827,15 @@ def find_and_join_table(gf, page, table_name, password):
     if has_password_input.get('found'):
         pw_entered = gf.evaluate("""(pw) => {
             const dialog = document.querySelector(
-                '.msgBoxBackGround, [class*="msgBox"], '
+                '.msgBoxBackGround, [class*="msgBox"], ' +
                 '[class*="dialog"], [class*="Dialog"]');
             if (!dialog) return {entered: false};
             let inputs = dialog.querySelectorAll('input[type="password"]');
             if (inputs.length === 0) {
                 inputs = dialog.querySelectorAll('input[type="text"]');
             }
-            for (const inp of inputs) {
+            for (let k = 0; k < inputs.length; k++) {
+                const inp = inputs[k];
                 if (inp.offsetParent === null) continue;
                 inp.value = pw;
                 inp.dispatchEvent(new Event('input', {bubbles: true}));
@@ -757,11 +851,18 @@ def find_and_join_table(gf, page, table_name, password):
     play_clicked = None
     for play_attempt in range(3):
         play_clicked = gf.evaluate("""() => {
+            function cleanText(s) {
+                return String(s || '').split(' ').filter(function(p) {
+                    return p.length > 0;
+                }).join(' ');
+            }
             const all = document.querySelectorAll(
-                'input[type="button"], button, a, [role="button"], [class*="btn"]');
-            for (const b of all) {
+                'input[type="button"], button, a, ' +
+                '[role="button"], [class*="btn"]');
+            for (let k = 0; k < all.length; k++) {
+                const b = all[k];
                 if (b.offsetParent === null) continue;
-                const txt = (b.value || b.textContent || '')
+                const txt = cleanText(b.value || b.textContent || '')
                     .toLowerCase().trim();
                 if (txt === 'play' || txt === 'vào' ||
                     txt === 'join' || txt === 'vào bàn') {
@@ -777,15 +878,16 @@ def find_and_join_table(gf, page, table_name, password):
     print(f"  Clicked Play: {play_clicked}", flush=True)
     time.sleep(3)
 
-    # Kiểm tra dialog password sau Play
+    # Dialog password sau Play
     post_play_dialog = []
     for check in range(8):
         post_play_dialog = gf.evaluate("""() => {
             const result = [];
             const inputs = document.querySelectorAll('input[type="password"]');
-            for (const inp of inputs) {
+            for (let k = 0; k < inputs.length; k++) {
+                const inp = inputs[k];
                 if (inp.offsetParent === null) continue;
-                result.push({found: true, name: inp.name});
+                result.push({found: true, name: inp.name || ''});
             }
             return result;
         }""")
@@ -796,7 +898,9 @@ def find_and_join_table(gf, page, table_name, password):
 
     if post_play_dialog:
         gf.evaluate("""(pw) => {
-            for (const inp of document.querySelectorAll('input[type="password"]')) {
+            const inputs = document.querySelectorAll('input[type="password"]');
+            for (let k = 0; k < inputs.length; k++) {
+                const inp = inputs[k];
                 if (inp.offsetParent === null) continue;
                 inp.focus();
                 inp.value = pw;
@@ -808,19 +912,23 @@ def find_and_join_table(gf, page, table_name, password):
         time.sleep(2)
 
         gf.evaluate("""() => {
-            for (const inp of document.querySelectorAll('input[type="password"]')) {
+            const inputs = document.querySelectorAll('input[type="password"]');
+            for (let k = 0; k < inputs.length; k++) {
+                const inp = inputs[k];
                 if (inp.offsetParent === null) continue;
                 let dialog = inp.parentElement;
                 for (let i = 0; i < 10 && dialog; i++) {
-                    if (dialog.querySelector('input[type="button"], button')) break;
+                    if (dialog.querySelector('input[type="button"], button'))
+                        break;
                     dialog = dialog.parentElement;
                 }
                 if (dialog) {
                     const btns = dialog.querySelectorAll(
                         'input[type="button"], button');
-                    for (const b of btns) {
+                    for (let j = 0; j < btns.length; j++) {
+                        const b = btns[j];
                         if (b.offsetParent === null) continue;
-                        const txt = (b.value || b.textContent || '')
+                        const txt = String(b.value || b.textContent || '')
                             .toLowerCase().trim();
                         if (txt === 'ok' || txt === 'xác nhận' ||
                             txt === 'confirm') {
@@ -828,9 +936,9 @@ def find_and_join_table(gf, page, table_name, password):
                             return;
                         }
                     }
-                    for (const b of btns) {
-                        if (b.offsetParent !== null) {
-                            b.click();
+                    for (let j = 0; j < btns.length; j++) {
+                        if (btns[j].offsetParent !== null) {
+                            btns[j].click();
                             return;
                         }
                     }
@@ -854,24 +962,25 @@ def find_and_join_table(gf, page, table_name, password):
 
         in_table = gf.evaluate("""() => {
             const hasBoard = document.querySelector(
-                '.tableBoard, .gameBoard, [class*="tableBoard"], '
+                '.tableBoard, .gameBoard, [class*="tableBoard"], ' +
                 '[class*="game-board"]') !== null;
             let hasBaoSam = false;
             let hasLeaveBtn = false;
             let hasDealBtn = false;
-            document.querySelectorAll(
-                'input[type="button"], button, a, [class*="btn"]'
-            ).forEach(b => {
-                if (b.offsetParent === null) return;
-                const t = (b.value || b.textContent || '').toLowerCase();
-                if (t.includes('báo sâm') || t.includes('bao sam') ||
-                    t.includes('declare') || t.includes('invade'))
+            const btns = document.querySelectorAll(
+                'input[type="button"], button, a, [class*="btn"]');
+            for (let k = 0; k < btns.length; k++) {
+                const b = btns[k];
+                if (b.offsetParent === null) continue;
+                const t = String(b.value || b.textContent || '').toLowerCase();
+                if (t.indexOf('báo sâm') >= 0 || t.indexOf('bao sam') >= 0 ||
+                    t.indexOf('declare') >= 0 || t.indexOf('invade') >= 0)
                     hasBaoSam = true;
-                if (t.includes('rời') || t.includes('leave') ||
-                    t.includes('thoát')) hasLeaveBtn = true;
-                if (t.includes('deal') || t.includes('chia'))
+                if (t.indexOf('rời') >= 0 || t.indexOf('leave') >= 0 ||
+                    t.indexOf('thoát') >= 0) hasLeaveBtn = true;
+                if (t.indexOf('deal') >= 0 || t.indexOf('chia') >= 0)
                     hasDealBtn = true;
-            });
+            }
             return {hasBoard, hasBaoSam, hasLeaveBtn, hasDealBtn};
         }""")
 
@@ -884,7 +993,6 @@ def find_and_join_table(gf, page, table_name, password):
             print(f"  ✓ IN TABLE", flush=True)
             return True
 
-    # Nếu password đã nhập được → giả định vào bàn (game UI canvas-based)
     if post_play_dialog:
         print(f"  Password accepted → assume in table", flush=True)
         return True
@@ -894,26 +1002,31 @@ def find_and_join_table(gf, page, table_name, password):
 
 
 # ============================================================
-# DECLARE SÂM + WAIT GAME OVER
+# DECLARE SÂM
 # ============================================================
 def declare_sam_and_wait(gf, max_wait=240):
-    """Click 'Invade'/'Báo sâm', đợi game kết thúc."""
     print(f"\n[FARMER] Declaring Sâm + waiting (max {max_wait}s)...", flush=True)
 
     declared = gf.evaluate("""() => {
+        function cleanText(s) {
+            return String(s || '').split(' ').filter(function(p) {
+                return p.length > 0;
+            }).join(' ');
+        }
         const all = document.querySelectorAll('*');
-        for (const el of all) {
+        for (let k = 0; k < all.length; k++) {
+            const el = all[k];
             if (el.offsetParent === null) continue;
-            const txt = (el.textContent || el.value || '')
+            const txt = cleanText(el.textContent || el.value || '')
                 .toLowerCase().trim();
-            const title = (el.getAttribute('title') ||
-                           el.getAttribute('aria-label') || '')
+            const title = String(el.getAttribute('title') ||
+                                 el.getAttribute('aria-label') || '')
                 .toLowerCase();
-            const cls = (el.className || '').toString().toLowerCase();
-            if (txt === 'invade' || txt.includes('báo sâm') ||
-                txt.includes('bao sam') ||
-                title === 'invade' || title.includes('báo sâm') ||
-                cls.includes('invade') || cls.includes('baosam')) {
+            const cls = String(el.className || '').toLowerCase();
+            if (txt === 'invade' ||
+                txt.indexOf('báo sâm') >= 0 || txt.indexOf('bao sam') >= 0 ||
+                title === 'invade' || title.indexOf('báo sâm') >= 0 ||
+                cls.indexOf('invade') >= 0 || cls.indexOf('baosam') >= 0) {
                 el.click();
                 return {declared: true, tag: el.tagName, text: txt};
             }
@@ -929,26 +1042,29 @@ def declare_sam_and_wait(gf, max_wait=240):
     while time.time() - start < max_wait:
         try:
             state = gf.evaluate("""() => {
-                const txt = document.body?.innerText?.substring(0, 800) || '';
-                const gameOver = txt.toLowerCase().includes('game over') ||
-                                 txt.includes('kết thúc') ||
-                                 txt.includes('kết quả') ||
-                                 txt.toLowerCase().includes('you lose') ||
-                                 txt.toLowerCase().includes('thua') ||
-                                 txt.toLowerCase().includes('winner') ||
-                                 txt.toLowerCase().includes('thắng');
+                const txt = (document.body
+                    ? document.body.innerText.substring(0, 800)
+                    : '').toLowerCase();
+                const gameOver = txt.indexOf('game over') >= 0 ||
+                                 txt.indexOf('kết thúc') >= 0 ||
+                                 txt.indexOf('kết quả') >= 0 ||
+                                 txt.indexOf('you lose') >= 0 ||
+                                 txt.indexOf('thua') >= 0 ||
+                                 txt.indexOf('winner') >= 0 ||
+                                 txt.indexOf('thắng') >= 0;
                 let hasOkBtn = false;
-                document.querySelectorAll(
-                    'input[type="button"], button, a, div, span'
-                ).forEach(b => {
-                    if (b.offsetParent === null) return;
-                    const t = (b.value || b.textContent || '')
+                const els = document.querySelectorAll(
+                    'input[type="button"], button, a, div, span');
+                for (let k = 0; k < els.length; k++) {
+                    const b = els[k];
+                    if (b.offsetParent === null) continue;
+                    const t = String(b.value || b.textContent || '')
                         .toLowerCase().trim();
                     if (t === 'ok' || t === 'đóng' || t === 'close' ||
-                        t === 'tiếp tục') hasOkBtn = true;
-                });
-                const balance = document.querySelector('.chipBalance')
-                    ?.textContent?.trim() || null;
+                        t === 'tiếp tục') { hasOkBtn = true; break; }
+                }
+                const balEl = document.querySelector('.chipBalance');
+                const balance = balEl ? balEl.textContent.trim() : null;
                 return {gameOver, hasOkBtn, balance};
             }""")
 
@@ -957,12 +1073,13 @@ def declare_sam_and_wait(gf, max_wait=240):
                 gf.evaluate("""() => {
                     const btns = document.querySelectorAll(
                         'input[type="button"], button, a, div, span');
-                    for (const b of btns) {
+                    for (let k = 0; k < btns.length; k++) {
+                        const b = btns[k];
                         if (b.offsetParent === null) continue;
-                        const t = (b.value || b.textContent || '')
+                        const t = String(b.value || b.textContent || '')
                             .toLowerCase().trim();
                         if (t === 'ok' || t === 'đóng' || t === 'close' ||
-                            t === 'tiếp tục' || t.includes('chơi lại')) {
+                            t === 'tiếp tục' || t.indexOf('chơi lại') >= 0) {
                             b.click();
                             return;
                         }
@@ -994,10 +1111,9 @@ def declare_sam_and_wait(gf, max_wait=240):
 
 
 # ============================================================
-# RUN ONE SESSION (1 cookie)
+# RUN ONE SESSION
 # ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
-    """Mở browser → login → claim → join table → declare → close."""
     print(f"\n########## SESSION {session_id} [{cookie_file}] ##########", flush=True)
 
     browser = p.chromium.launch(
@@ -1028,7 +1144,6 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
 
     page = context.new_page()
 
-    # Login
     print("[1] Login FB...", flush=True)
     try:
         page.goto("https://www.facebook.com/",
@@ -1052,7 +1167,6 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
         return 0, 0, 0, False
     print("  OK", flush=True)
 
-    # Open game
     gf, ws_ok = open_sam_loc(page, f"S{session_id}")
     if not ws_ok or gf is None:
         print(f"[SESSION {session_id}] Không mở được game", flush=True)
@@ -1081,7 +1195,6 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
         cycle_result = {"cycle": cycle, "claimed": 0,
                         "joined": False, "declared": False, "lost_xu": 0}
 
-        # STEP 1: Claim
         if SKIP_CLAIM:
             print(f"\n[CYCLE {cycle}] SKIP claims", flush=True)
             total_claimed, rewards = 0, []
@@ -1099,10 +1212,14 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
             cycle_results.append(cycle_result)
             break
 
-        # STEP 2: Join table
         print(f"\n[CYCLE {cycle} STEP 2] Join table '{TARGET_TABLE_NAME}'",
               flush=True)
-        joined = find_and_join_table(gf, page, TARGET_TABLE_NAME, TABLE_PASSWORD)
+        try:
+            joined = find_and_join_table(gf, page, TARGET_TABLE_NAME,
+                                         TABLE_PASSWORD)
+        except Exception as e:
+            print(f"[CYCLE {cycle}] Join table error: {e}", flush=True)
+            joined = False
         cycle_result["joined"] = joined
 
         if not joined:
@@ -1110,7 +1227,6 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
             cycle_results.append(cycle_result)
             continue
 
-        # STEP 3: Declare sâm
         print(f"\n[CYCLE {cycle} STEP 3] Declare sâm + wait", flush=True)
         bal_before_lose = get_bal(gf)
         print(f"[CYCLE {cycle}] Balance before: {bal_before_lose}", flush=True)
@@ -1132,19 +1248,20 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
         cycle_result["declared"] = game_over
         cycle_results.append(cycle_result)
 
-        # Về lobby cho cycle tiếp
         try:
             gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
             time.sleep(2)
             gf.evaluate("""() => {
                 const btns = document.querySelectorAll(
                     'input[type="button"], button, a');
-                for (const b of btns) {
+                for (let k = 0; k < btns.length; k++) {
+                    const b = btns[k];
                     if (b.offsetParent === null) continue;
-                    const t = (b.value || b.textContent || '').toLowerCase();
-                    if (t.includes('back') || t.includes('rời') ||
-                        t.includes('thoát') || t.includes('return') ||
-                        t.includes('lobby')) {
+                    const t = String(b.value || b.textContent || '')
+                        .toLowerCase();
+                    if (t.indexOf('back') >= 0 || t.indexOf('rời') >= 0 ||
+                        t.indexOf('thoát') >= 0 || t.indexOf('return') >= 0 ||
+                        t.indexOf('lobby') >= 0) {
                         b.click();
                         return;
                     }
@@ -1176,7 +1293,7 @@ def run_one_session(p, fb_cookies, session_id, started_at, cookie_file="?"):
 # ============================================================
 def main():
     print("=" * 60, flush=True)
-    print("Sâm Lốc Farmer Bot v9.2", flush=True)
+    print("Sâm Lốc Farmer Bot v9.3", flush=True)
     print(f"Table: '{TARGET_TABLE_NAME}' | Password: '{TABLE_PASSWORD}'", flush=True)
     print(f"Claims/cycle: {MAX_CLAIMS} | Cycles: {CYCLES} | "
           f"SKIP_CLAIM={SKIP_CLAIM}", flush=True)
