@@ -7,7 +7,7 @@ on:
     inputs:
       max_claims:
         description: 'So cycles moi session (roi dong browser)'
-        default: '30'
+        default: '40'
       cooldown:
         description: 'Nghi giua cac claim (giay)'
         default: '3'
