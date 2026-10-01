@@ -1,0 +1,119 @@
+name: Sâm Lốc Bot — Parallel Batch (WARP optional)
+
+# Trigger:
+#   - Schedule: every 2 hours (12 runs/day)
+#   - Manual: workflow_dispatch button on Actions tab
+#
+# Per run: spawn N parallel processes (one per ck*.txt)
+# Each process: 40 claims + transfer to 51977054
+# Runner has 7GB RAM → supports ~10 parallel Chromium
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # every 2 hours
+  workflow_dispatch:
+    inputs:
+      max_claims:
+        description: 'Claims per cookie'
+        default: '40'
+        type: string
+      max_runtime:
+        description: 'Max seconds per session'
+        default: '600'
+        type: string
+
+jobs:
+  parallel-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35  # 25 min batch + 10 min buffer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-v1
+
+      - name: Install dependencies
+        run: |
+          pip install --quiet playwright websocket-client
+          playwright install chromium --with-deps
+          echo "✓ Playwright + Chromium installed"
+
+      - name: List cookie files
+        run: |
+          echo "=== Cookie files found ==="
+          ls -la ck*.txt 2>/dev/null || { echo "No ck*.txt files!"; exit 1; }
+          for f in ck*.txt; do
+            cuser=$(grep -oE 'c_user=[0-9]+' "$f" | head -1)
+            echo "  $f → $cuser"
+          done
+
+      - name: Run parallel bot batch
+        env:
+          MAX_CLAIMS: ${{ github.event.inputs.max_claims || '40' }}
+          MAX_RUNTIME_PER_SESSION: ${{ github.event.inputs.max_runtime || '600' }}
+          SLEEP_BETWEEN_BATCHES: '15'
+          WARP_ROTATE_BETWEEN_BATCHES: 'false'  # GitHub runners don't have WARP
+          WARP_AUTO_INSTALL: 'false'
+        run: |
+          # Run ONE batch (1 iteration, not infinite loop)
+          # Patch run_parallel.sh to break after 1 batch on GitHub Actions
+          sed -i 's/^while true; do/for _ in 1; do/' run_parallel_warp.sh 2>/dev/null || true
+          
+          # Use run_parallel.sh (no WARP) — GitHub runners already have rotating IPs
+          sed -i 's/^while true; do/for _ in 1; do/' run_parallel.sh
+          
+          # Set trap to NOT disconnect WARP (we don't use it on GitHub)
+          # Just run parallel for 1 batch
+          bash run_parallel.sh
+          
+          echo ""
+          echo "===== Batch done. Per-cookie summary: ====="
+          for ck in ck*.txt; do
+            [ -f "$ck" ] || continue
+            ck_log="${ck%.txt}.log"
+            if [ -f "$ck_log" ]; then
+              echo ""
+              echo "--- $ck ---"
+              tail -15 "$ck_log"
+              echo ""
+              echo "Transfers in $ck_log:"
+              grep -E "✅ Transferred|❌ Transfer" "$ck_log" 2>/dev/null | tail -5
+            fi
+          done
+
+      - name: Upload logs as artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: bot-logs-${{ github.run_id }}
+          path: |
+            ck*.log
+            loop_parallel.log
+            loop_parallel_warp.log
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## 🤖 Bot Batch Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Cookie | Claims | Transferred |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------|--------------|" >> $GITHUB_STEP_SUMMARY
+          for ck in ck*.txt; do
+            [ -f "$ck" ] || continue
+            ck_log="${ck%.txt}.log"
+            if [ -f "$ck_log" ]; then
+              claims=$(grep -c "^\s*[0-9]\+:" "$ck_log" 2>/dev/null | head -1 || echo "0")
+              transfers=$(grep -c "✅ Transferred" "$ck_log" 2>/dev/null || echo "0")
+              last=$(grep "✅ Transferred" "$ck_log" 2>/dev/null | tail -1 | grep -oE '[0-9,]+ xu' | head -1)
+              echo "| $ck | $claims | $transfers (last: $last) |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
