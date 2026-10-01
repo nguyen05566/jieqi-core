@@ -1,7 +1,7 @@
 name: Sâm Lốc Bot — Parallel Batch (WARP optional)
 
 # Trigger:
-#   - Schedule: every 2 hours (12 runs/day)
+#   - Schedule: every 3 hours (8 runs/day)
 #   - Manual: workflow_dispatch button on Actions tab
 #
 # Per run: spawn N parallel processes (one per ck*.txt)
@@ -10,7 +10,7 @@ name: Sâm Lốc Bot — Parallel Batch (WARP optional)
 
 on:
   schedule:
-    - cron: '0 */2 * * *'  # every 2 hours
+    - cron: '0 */3 * * *'  # every 3 hours
   workflow_dispatch:
     inputs:
       max_claims:
