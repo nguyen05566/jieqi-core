@@ -19,7 +19,7 @@ on:
         type: string
       max_runtime:
         description: 'Max seconds per session'
-        default: '600'
+        default: '60000'
         type: string
 
 jobs:
