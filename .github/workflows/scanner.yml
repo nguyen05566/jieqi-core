@@ -1,0 +1,40 @@
+name: Sam Loc Scanner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          pip install playwright
+          npx playwright install chromium --with-deps
+
+      - name: Run scanner
+        env:
+          HEADLESS: 'true'
+        run: |
+          echo "===== Cookie files ====="
+          ls -la ck*.txt
+          echo "========================"
+          python3 sam_scanner_v10.py 2>&1 | tee /tmp/scanner_log.txt
+
+      - name: Upload log + screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-output
+          path: |
+            /tmp/scanner_log.txt
+            /tmp/scanner_final.png
+            /tmp/scanner_no_frame.png
+          if-no-files-found: ignore
