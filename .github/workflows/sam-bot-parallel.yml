@@ -1,31 +1,36 @@
-name: Sâm Lốc Bot — Parallel Batch (WARP optional)
+name: Sâm Lốc Bot — 3-Hour Parallel Batch
 
 # Trigger:
-#   - Schedule: every 3 hours (8 runs/day)
+#   - Schedule: every 4 hours (6 runs/day, each 3h)
 #   - Manual: workflow_dispatch button on Actions tab
 #
-# Per run: spawn N parallel processes (one per ck*.txt)
-# Each process: 40 claims + transfer to 51977054
-# Runner has 7GB RAM → supports ~10 parallel Chromium
+# Per run: 3-hour continuous loop of parallel batches
+# Each batch: spawn N processes (one per ck*.txt), each 40 claims + transfer
+# After batch → sleep 15s → next batch → repeat until MAX_RUNTIME_TOTAL (3h)
+#
+# Throughput (3 cookies, ~10min/batch):
+#   Per batch: ~141,000 xu (3 × 47k)
+#   Per 3h run: ~18 batches × 141k = ~2.5M xu
+#   Per day: 6 runs × 2.5M = ~15M xu
 
 on:
   schedule:
-    - cron: '0 */3 * * *'  # every 3 hours
+    - cron: '0 */4 * * *'  # every 4 hours (gives 1h buffer between 3h runs)
   workflow_dispatch:
     inputs:
       max_claims:
-        description: 'Claims per cookie'
+        description: 'Claims per cookie per batch'
         default: '40'
         type: string
-      max_runtime:
-        description: 'Max seconds per session'
-        default: '60000'
+      total_runtime_hours:
+        description: 'Total run duration (hours)'
+        default: '3'
         type: string
 
 jobs:
-  parallel-bot:
+  parallel-bot-3h:
     runs-on: ubuntu-latest
-    timeout-minutes: 35  # 25 min batch + 10 min buffer
+    timeout-minutes: 200  # 3h20min — slight buffer over 3h
     steps:
       - uses: actions/checkout@v4
 
@@ -55,39 +60,47 @@ jobs:
             echo "  $f → $cuser"
           done
 
-      - name: Run parallel bot batch
+      - name: Run 3-hour parallel loop
         env:
           MAX_CLAIMS: ${{ github.event.inputs.max_claims || '40' }}
-          MAX_RUNTIME_PER_SESSION: ${{ github.event.inputs.max_runtime || '600' }}
+          MAX_RUNTIME_PER_SESSION: '600'
           SLEEP_BETWEEN_BATCHES: '15'
-          WARP_ROTATE_BETWEEN_BATCHES: 'false'  # GitHub runners don't have WARP
-          WARP_AUTO_INSTALL: 'false'
         run: |
-          # Run ONE batch (1 iteration, not infinite loop)
-          # Patch run_parallel.sh to break after 1 batch on GitHub Actions
-          sed -i 's/^while true; do/for _ in 1; do/' run_parallel_warp.sh 2>/dev/null || true
+          # Compute MAX_RUNTIME_TOTAL from input hours (default 3h = 10800s)
+          HOURS="${{ github.event.inputs.total_runtime_hours || '3' }}"
+          MAX_RUNTIME_TOTAL=$((HOURS * 3600))
+          export MAX_RUNTIME_TOTAL
           
-          # Use run_parallel.sh (no WARP) — GitHub runners already have rotating IPs
-          sed -i 's/^while true; do/for _ in 1; do/' run_parallel.sh
+          echo "=== Starting ${HOURS}-hour parallel loop ==="
+          echo "MAX_RUNTIME_TOTAL=$MAX_RUNTIME_TOTAL seconds ($HOURS hours)"
+          echo "MAX_CLAIMS=$MAX_CLAIMS per cookie per batch"
+          echo ""
           
-          # Set trap to NOT disconnect WARP (we don't use it on GitHub)
-          # Just run parallel for 1 batch
+          # Run the parallel loop directly — it will check MAX_RUNTIME_TOTAL internally
           bash run_parallel.sh
           
           echo ""
-          echo "===== Batch done. Per-cookie summary: ====="
+          echo "===== Run completed. Final per-cookie summary: ====="
           for ck in ck*.txt; do
             [ -f "$ck" ] || continue
             ck_log="${ck%.txt}.log"
             if [ -f "$ck_log" ]; then
               echo ""
-              echo "--- $ck ---"
-              tail -15 "$ck_log"
+              echo "--- $ck (last 20 lines) ---"
+              tail -20 "$ck_log"
               echo ""
               echo "Transfers in $ck_log:"
-              grep -E "✅ Transferred|❌ Transfer" "$ck_log" 2>/dev/null | tail -5
+              grep -E "✅ Transferred|❌ Transfer" "$ck_log" 2>/dev/null | tail -10
+              total_xu=$(grep "✅ Transferred" "$ck_log" 2>/dev/null | grep -oE '[0-9,]+ xu' | tr -d ',' | awk '{sum+=$1} END {print sum}')
+              echo "  Total transferred: ${total_xu:-0} xu"
             fi
           done
+
+      - name: Show main loop log
+        if: always()
+        run: |
+          echo "=== loop_parallel.log (last 80 lines) ==="
+          tail -80 loop_parallel.log 2>/dev/null || echo "(no main log)"
 
       - name: Upload logs as artifact
         if: always()
@@ -97,23 +110,28 @@ jobs:
           path: |
             ck*.log
             loop_parallel.log
-            loop_parallel_warp.log
           retention-days: 7
 
       - name: Summary
         if: always()
         run: |
-          echo "## 🤖 Bot Batch Summary" >> $GITHUB_STEP_SUMMARY
+          HOURS="${{ github.event.inputs.total_runtime_hours || '3' }}"
+          echo "## 🤖 ${HOURS}-Hour Bot Run Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Cookie | Claims | Transferred |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------|--------------|" >> $GITHUB_STEP_SUMMARY
+          echo "Run duration: ${HOURS} hours" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Cookie | Total Transfers | Total Xu |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-----------------|-----------|" >> $GITHUB_STEP_SUMMARY
+          TOTAL_XU=0
           for ck in ck*.txt; do
             [ -f "$ck" ] || continue
             ck_log="${ck%.txt}.log"
             if [ -f "$ck_log" ]; then
-              claims=$(grep -c "^\s*[0-9]\+:" "$ck_log" 2>/dev/null | head -1 || echo "0")
-              transfers=$(grep -c "✅ Transferred" "$ck_log" 2>/dev/null || echo "0")
-              last=$(grep "✅ Transferred" "$ck_log" 2>/dev/null | tail -1 | grep -oE '[0-9,]+ xu' | head -1)
-              echo "| $ck | $claims | $transfers (last: $last) |" >> $GITHUB_STEP_SUMMARY
+              transfer_count=$(grep -c "✅ Transferred" "$ck_log" 2>/dev/null || echo 0)
+              total_xu=$(grep "✅ Transferred" "$ck_log" 2>/dev/null | grep -oE '[0-9,]+ xu' | tr -d ',' | awk '{sum+=$1} END {print sum+0}')
+              TOTAL_XU=$((TOTAL_XU + ${total_xu:-0}))
+              echo "| $ck | $transfer_count | ${total_xu:-0} |" >> $GITHUB_STEP_SUMMARY
             fi
           done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Total transferred: ${TOTAL_XU} xu → 51977054**" >> $GITHUB_STEP_SUMMARY
