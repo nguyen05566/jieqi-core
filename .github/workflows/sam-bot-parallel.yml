@@ -63,7 +63,7 @@ jobs:
       - name: Run 3-hour parallel loop
         env:
           MAX_CLAIMS: ${{ github.event.inputs.max_claims || '40' }}
-          MAX_RUNTIME_PER_SESSION: '300'
+          MAX_RUNTIME_PER_SESSION: '10'
           SLEEP_BETWEEN_BATCHES: '5'
         run: |
           # Compute MAX_RUNTIME_TOTAL from input hours (default 3h = 10800s)
