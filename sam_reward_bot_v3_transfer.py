@@ -252,8 +252,19 @@ def ensure_ws_connected(gf, page, max_retries=2):
     return False
 
 
-def trigger_and_claim(gf):
-    """Y NGUYÊN mã gốc + retry mechanism."""
+def trigger_and_claim(gf, page):
+    """v3 logic + retry + WS reconnect before each claim.
+    
+    Now requires `page` to call ensure_ws_connected() if WS dies.
+    """
+    # NEW: Verify WS is connected before doing anything (reload if dead)
+    if not ensure_ws_connected(gf, page, max_retries=1):
+        return {"success": False, "error": "ws reconnect failed"}
+    # After possible reload, re-find gf
+    gf_new = find_gf(page, max_wait=30)
+    if gf_new:
+        gf = gf_new
+
     try:
         gf.evaluate("createTable()")
     except Exception:
@@ -302,11 +313,11 @@ def trigger_and_claim(gf):
     if alert_clicked:
         time.sleep(2)
 
-    # NEW: Retry logic — try up to 1 time if timeout or ws not connected (was 3, user requested 1)
-    max_retries = 1
-    timeout_ms = 15000  # increased from 8000
+    # Retry logic: try + 1 retry = 2 total attempts (user requested "retry 1 time")
+    max_attempts = 2
+    timeout_ms = 15000
     result = None
-    for attempt in range(max_retries):
+    for attempt in range(max_attempts):
         try:
             result = gf.evaluate(f"""() => {{
                 return new Promise((resolve) => {{
@@ -352,17 +363,25 @@ def trigger_and_claim(gf):
         if result.get('success') and result.get('amount', 0) > 0:
             break
 
-        # If not last attempt, log + retry
-        if attempt < max_retries - 1:
+        # If not last attempt, log + try to recover WS before retry
+        if attempt < max_attempts - 1:
             err = result.get('error', 'unknown')
-            print(f"  attempt {attempt+1}/{max_retries}: FAIL ({err}), retrying...", flush=True)
-            # Close any stuck msgBox dialogs before retry
+            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...", flush=True)
+            # Close stuck msgBox dialogs
             try:
                 gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
             except:
                 pass
             time.sleep(2)
-            # Re-click watch video button for retry
+            # Re-ensure WS connected (reload if needed)
+            if not ensure_ws_connected(gf, page, max_retries=1):
+                print(f"  WS still dead, skip retry", flush=True)
+                break
+            # Re-find gf after reload
+            gf_new = find_gf(page, max_wait=30)
+            if gf_new:
+                gf = gf_new
+            # Re-click watch video button
             try:
                 gf.evaluate("""() => {
                     const dialogs = document.querySelectorAll('[class*="msgBox"]');
@@ -384,7 +403,8 @@ def trigger_and_claim(gf):
                 pass
             time.sleep(1)
         else:
-            print(f"  attempt {attempt+1}/{max_retries}: FAIL after {max_retries} retries", flush=True)
+            err = result.get('error', 'unknown')
+            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}) — giving up", flush=True)
 
     if not result.get('success') or result.get('amount', 0) == 0:
         result['method'] = 'alert_clicked' if alert_clicked else 'no_alert'
@@ -538,7 +558,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         time.sleep(1)
 
         try:
-            result = trigger_and_claim(gf)
+            result = trigger_and_claim(gf, page)
         except Exception as e:
             print(f"  {i+1}: EXCEPTION ({e})", flush=True)
             fail += 1
