@@ -207,6 +207,28 @@ def find_gf(page, max_wait=120):
     return None
 
 
+def is_account_blocked(gf):
+    """NEW: Check if any visible alert dialog says account is blocked.
+    
+    Returns True if account is blocked (skip this cookie entirely).
+    """
+    try:
+        blocked = gf.evaluate("""() => {
+            const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
+            for (const d of dialogs) {
+                if (d.offsetParent === null) continue;
+                const txt = (d.textContent || '').toLowerCase();
+                if (txt.includes('blocked') || txt.includes('khóa') || txt.includes('cấm')) {
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        return bool(blocked)
+    except Exception:
+        return False
+
+
 def ensure_ws_connected(gf, page, max_retries=2):
     """NEW: Check WS state, reload page if disconnected.
     
@@ -506,6 +528,25 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         except Exception:
             pass
         time.sleep(3)
+
+    # ===== ADDED: Check if account is blocked (skip session entirely) =====
+    if is_account_blocked(gf):
+        print(f"  ❌ ACCOUNT BLOCKED — skipping this cookie (do NOT retry)", flush=True)
+        # Dismiss all alert dialogs
+        try:
+            gf.evaluate("""() => {
+                const btns = document.querySelectorAll('input[type="button"], button');
+                for (const b of btns) {
+                    const t = (b.value || b.textContent || '').toLowerCase().trim();
+                    if (t === 'ok' || t === 'đóng' || t === 'close') {
+                        b.click();
+                    }
+                }
+            }""")
+        except: pass
+        try: browser.close()
+        except: pass
+        return 0, 0, 0, False  # cookies_ok=False so main loop skips this cookie
 
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
