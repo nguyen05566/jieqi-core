@@ -105,12 +105,21 @@ def get_bal(gf):
         return "?"
 
 
-def transfer_all_xu(gf, dest_id=TRANSFER_DEST_ID):
+def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
     """ADDED: Transfer ALL current xu về dest_id via game's connection.send.
     
-    Uses the game's OutboundMessage + connection.send (same API as VIDEO_REWARD).
+    If WS not connected, reload page (via ensure_ws_connected) and retry.
     Returns dict {success, amount, status, message}.
     """
+    # Ensure WS is connected (reload page if needed)
+    if not ensure_ws_connected(gf, page):
+        return {"success": False, "error": "ws reconnect failed after reloads"}
+
+    # After reload, re-find game frame (gf may have changed)
+    gf_new = find_gf(page, max_wait=30)
+    if gf_new:
+        gf = gf_new
+
     try:
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
@@ -118,7 +127,6 @@ def transfer_all_xu(gf, dest_id=TRANSFER_DEST_ID):
                     // 1. Read balance from .chipBalance DOM
                     const balEl = document.querySelector('.chipBalance');
                     const balText = balEl ? balEl.textContent.trim() : '0';
-                    // Parse: remove non-digit chars, handle 'k' suffix
                     let balance = 0;
                     const cleaned = balText.replace(/[^0-9kK.]/g, '');
                     if (cleaned.toLowerCase().endsWith('k')) {
@@ -126,18 +134,18 @@ def transfer_all_xu(gf, dest_id=TRANSFER_DEST_ID):
                     } else if (cleaned) {
                         balance = parseInt(cleaned) || 0;
                     }
-                    
+
                     if (balance < 200) {
                         resolve({success: false, error: 'balance < 200', balance: balance});
                         return;
                     }
-                    
-                    // 2. Check WS connection
+
+                    // 2. Check WS connection (again, after ensure_ws_connected)
                     if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
                         resolve({success: false, error: 'ws not connected', balance: balance});
                         return;
                     }
-                    
+
                     // 3. Send TRANSFER
                     const msg = new OutboundMessage("TRANSFER");
                     msg.writeLong(destId);
@@ -154,7 +162,6 @@ def transfer_all_xu(gf, dest_id=TRANSFER_DEST_ID):
                             resolve({success: ok, error: e.toString(), balance: balance});
                         }
                     });
-                    // Timeout 12s
                     setTimeout(() => {
                         if (!resolved) {
                             resolved = true;
@@ -181,8 +188,53 @@ def find_gf(page, max_wait=120):
     return None
 
 
+def ensure_ws_connected(gf, page, max_retries=2):
+    """NEW: Check WS state, reload page if disconnected.
+    
+    Returns True if WS is now connected (after possible reload).
+    """
+    try:
+        ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
+        if ws_ok:
+            return True
+    except Exception:
+        pass
+
+    print(f"  ⚠ WS not connected — reloading page...", flush=True)
+
+    for retry in range(max_retries):
+        try:
+            # Reload the parent page (game will reload too)
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(20000)  # 20s for game to load
+
+            # Re-find game frame after reload
+            new_gf = find_gf(page, max_wait=60)
+            if not new_gf:
+                print(f"  ⚠ Reload #{retry+1}: game frame not found", flush=True)
+                continue
+
+            # Wait for WS connection
+            for ws_check in range(15):  # 45s wait
+                try:
+                    ws_ok = new_gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
+                    if ws_ok:
+                        print(f"  ✓ WS reconnected after reload #{retry+1}", flush=True)
+                        # Update gf reference in caller's scope via mutable container
+                        # (caller should re-call find_gf itself if needed)
+                        return True
+                except:
+                    pass
+                page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"  ⚠ Reload #{retry+1} error: {e}", flush=True)
+
+    print(f"  ❌ WS reconnect failed after {max_retries} reloads", flush=True)
+    return False
+
+
 def trigger_and_claim(gf):
-    """Y NGUYÊN mã gốc."""
+    """Y NGUYÊN mã gốc + retry mechanism."""
     try:
         gf.evaluate("createTable()")
     except Exception:
@@ -231,43 +283,89 @@ def trigger_and_claim(gf):
     if alert_clicked:
         time.sleep(2)
 
-    result = gf.evaluate("""() => {
-        return new Promise((resolve) => {
-            try {
-                if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
-                    resolve({success: false, error: 'ws not connected'});
-                    return;
-                }
-                const msg = new OutboundMessage("VIDEO_REWARD");
-                msg.writeByte(1);
-                let resolved = false;
-                connection.send(msg, function(response, success) {
-                    if (resolved) return;
-                    resolved = true;
-                    if (success) {
-                        try {
-                            const amount = response.readLong();
-                            if (window.Ads && window.Ads.RewardedVideo) {
-                                window.Ads.RewardedVideo.videoIndex++;
-                                if (window.Ads.RewardedVideo.updateRewardButton)
-                                    window.Ads.RewardedVideo.updateRewardButton();
+    # NEW: Retry logic — try up to 3 times if timeout or ws not connected
+    max_retries = 3
+    timeout_ms = 15000  # increased from 8000
+    result = None
+    for attempt in range(max_retries):
+        try:
+            result = gf.evaluate(f"""() => {{
+                return new Promise((resolve) => {{
+                    try {{
+                        if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {{
+                            resolve({{success: false, error: 'ws not connected'}});
+                            return;
+                        }}
+                        const msg = new OutboundMessage("VIDEO_REWARD");
+                        msg.writeByte(1);
+                        let resolved = false;
+                        connection.send(msg, function(response, success) {{
+                            if (resolved) return;
+                            resolved = true;
+                            if (success) {{
+                                try {{
+                                    const amount = response.readLong();
+                                    if (window.Ads && window.Ads.RewardedVideo) {{
+                                        window.Ads.RewardedVideo.videoIndex++;
+                                        if (window.Ads.RewardedVideo.updateRewardButton)
+                                            window.Ads.RewardedVideo.updateRewardButton();
+                                    }}
+                                    resolve({{success: true, amount: amount}});
+                                }} catch(e) {{
+                                    resolve({{success: true, amount: 0, error: e.toString()}});
+                                }}
+                            }} else {{
+                                resolve({{success: false, error: 'no response'}});
+                            }}
+                        }});
+                        setTimeout(() => {{
+                            if (!resolved) {{ resolved = true; resolve({{success: false, error: 'timeout'}}); }}
+                        }}, {timeout_ms});
+                    }} catch(e) {{
+                        resolve({{success: false, error: e.toString()}});
+                    }}
+                }});
+            }}""")
+        except Exception as e:
+            result = {"success": False, "error": f"evaluate error: {e}"}
+
+        # Check result — if success, break out of retry loop
+        if result.get('success') and result.get('amount', 0) > 0:
+            break
+
+        # If not last attempt, log + retry
+        if attempt < max_retries - 1:
+            err = result.get('error', 'unknown')
+            print(f"  attempt {attempt+1}/{max_retries}: FAIL ({err}), retrying...", flush=True)
+            # Close any stuck msgBox dialogs before retry
+            try:
+                gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
+            except:
+                pass
+            time.sleep(2)
+            # Re-click watch video button for retry
+            try:
+                gf.evaluate("""() => {
+                    const dialogs = document.querySelectorAll('[class*="msgBox"]');
+                    for (const d of dialogs) {
+                        if (d.offsetParent !== null && d.textContent.includes('enough coin')) {
+                            const buttons = d.querySelectorAll('input[type="button"], button');
+                            for (const b of buttons) {
+                                const val = (b.value || b.textContent || '').toLowerCase();
+                                if (val.includes('watch') || val.includes('video')) {
+                                    b.click();
+                                    return true;
+                                }
                             }
-                            resolve({success: true, amount: amount});
-                        } catch(e) {
-                            resolve({success: true, amount: 0, error: e.toString()});
                         }
-                    } else {
-                        resolve({success: false, error: 'no response'});
                     }
-                });
-                setTimeout(() => {
-                    if (!resolved) { resolved = true; resolve({success: false, error: 'timeout'}); }
-                }, 8000);
-            } catch(e) {
-                resolve({success: false, error: e.toString()});
-            }
-        });
-    }""")
+                    return false;
+                }""")
+            except:
+                pass
+            time.sleep(1)
+        else:
+            print(f"  attempt {attempt+1}/{max_retries}: FAIL after {max_retries} retries", flush=True)
 
     if not result.get('success') or result.get('amount', 0) == 0:
         result['method'] = 'alert_clicked' if alert_clicked else 'no_alert'
@@ -434,7 +532,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         try:
             # Brief delay to ensure balance DOM updated
             time.sleep(2)
-            transfer_result = transfer_all_xu(gf, TRANSFER_DEST_ID)
+            transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
             if transfer_result.get('success'):
                 amt = transfer_result.get('balance', 0)
                 msg = transfer_result.get('message', '')
