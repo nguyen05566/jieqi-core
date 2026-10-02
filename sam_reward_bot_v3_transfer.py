@@ -30,6 +30,25 @@ TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 # Nếu set, bot chỉ dùng 1 cookie file này (skip cycle) — để chạy song song N processes
 SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "")
 
+# ============ ADDED: Pre-claim transfer threshold ============
+# Nếu balance > ngưỡng này (xu), transfer trước khi claim tiếp (user request)
+PRE_CLAIM_TRANSFER_THRESHOLD = int(os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000"))
+
+
+def parse_balance_num(bal_text):
+    """Parse '56.4k' or '123,456' or '78900' → int."""
+    if not bal_text or bal_text == '?':
+        return 0
+    s = str(bal_text).strip().lower().replace(',', '').replace(' ', '')
+    try:
+        if s.endswith('k'):
+            return int(float(s[:-1]) * 1000)
+        if s.endswith('m'):
+            return int(float(s[:-1]) * 1000000)
+        return int(float(s))
+    except Exception:
+        return 0
+
 
 # ============================================================
 # ĐỌC COOKIE TỪ FILE ck*.txt
@@ -283,8 +302,8 @@ def trigger_and_claim(gf):
     if alert_clicked:
         time.sleep(2)
 
-    # NEW: Retry logic — try up to 3 times if timeout or ws not connected
-    max_retries = 3
+    # NEW: Retry logic — try up to 1 time if timeout or ws not connected (was 3, user requested 1)
+    max_retries = 1
     timeout_ms = 15000  # increased from 8000
     result = None
     for attempt in range(max_retries):
@@ -470,6 +489,34 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
+
+    # ===== ADDED: Pre-claim transfer — if balance > threshold, transfer first =====
+    bal_start_num = parse_balance_num(bal_start)
+    if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
+        print(f"\n[Pre-claim] Balance {bal_start_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
+              f"transferring first...", flush=True)
+        try:
+            pre_transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
+            if pre_transfer_result.get('success'):
+                amt = pre_transfer_result.get('balance', 0)
+                msg = pre_transfer_result.get('message', '')
+                print(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
+                if msg:
+                    print(f"     Server: {msg[:80]}", flush=True)
+                time.sleep(2)
+                bal_start = get_bal(gf)
+                print(f"     Balance after pre-transfer: {bal_start}", flush=True)
+            else:
+                err = pre_transfer_result.get('error', 'unknown')
+                print(f"  ❌ Pre-claim transfer fail: {err}", flush=True)
+                msg = pre_transfer_result.get('message', '')
+                if msg:
+                    print(f"     Server: {msg[:80]}", flush=True)
+        except Exception as e:
+            print(f"  ❌ Pre-claim transfer exception: {e}", flush=True)
+    elif bal_start_num > 0:
+        print(f"  (Balance {bal_start_num:,} ≤ {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
+              f"skip pre-claim transfer)", flush=True)
 
     # ===== Reward loop =====
     print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
