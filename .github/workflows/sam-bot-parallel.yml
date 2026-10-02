@@ -24,7 +24,7 @@ on:
         type: string
       total_runtime_hours:
         description: 'Total run duration (hours)'
-        default: '3'
+        default: '5'
         type: string
 
 jobs:
