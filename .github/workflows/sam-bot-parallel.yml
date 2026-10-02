@@ -30,7 +30,7 @@ on:
 jobs:
   parallel-bot-3h:
     runs-on: ubuntu-latest
-    timeout-minutes: 200  # 3h20min — slight buffer over 3h
+    timeout-minutes: 300  # 3h20min — slight buffer over 3h
     steps:
       - uses: actions/checkout@v4
 
@@ -63,8 +63,8 @@ jobs:
       - name: Run 3-hour parallel loop
         env:
           MAX_CLAIMS: ${{ github.event.inputs.max_claims || '40' }}
-          MAX_RUNTIME_PER_SESSION: '600'
-          SLEEP_BETWEEN_BATCHES: '15'
+          MAX_RUNTIME_PER_SESSION: '300'
+          SLEEP_BETWEEN_BATCHES: '5'
         run: |
           # Compute MAX_RUNTIME_TOTAL from input hours (default 3h = 10800s)
           HOURS="${{ github.event.inputs.total_runtime_hours || '3' }}"
