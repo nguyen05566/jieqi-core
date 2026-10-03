@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v14 — LOGGING ĐẦY ĐỦ + redirect detection."""
+"""FB Sam loc reward bot v14 — test cookie account 61595197311852.
+Logging đầy đủ, redirect detection, chạy vòng lặp vô hạn.
+"""
 import os, sys, time, json
 from datetime import datetime
 
@@ -24,22 +26,23 @@ def log(msg, tag=""):
 
 
 # ============================================================
-# >>> COOKIE <<<
+# >>> COOKIE — ACCOUNT 61595197311852 <<<
 # ============================================================
 COOKIE_RAW = (
     "sb=XSa_ahbAv9XMUHfep4z2jQUb; m_pixel_ratio=2; vpd=v1%3B616x360x2; "
-    "ps_l=1; ps_n=1; locale=vi_VN; "
+    "ps_l=1; ps_n=1; datr=IdzAalcIPU3mOeQoeHo4Qdyo; "
     "pas=61595197311852%3APOwi1i3tVJ%2C61594782729357%3AVvbK8iGoqB%2C"
     "61594960651753%3Aci75sCyaff%2C61594746041618%3AiAAzWgyfvh%2C"
     "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV%2C"
-    "61562610920837%3A83znIlEigO; "
-    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791022744; "
-    "datr=wdjAau4MNR7IM08V5XLbosEH; "
-    "c_user=61562610920837; "
-    "xs=28%3ANrZsCxInw1jA6Q%3A2%3A1791023450%3A-1%3A-1; "
-    "fr=0ZX5mgCABu4MTVFSz.AWcuhEX2bUUNxjweBtzGxg3dt_xwbsb-gRxPf8bHOn62MNo6GuE"
-    ".BqvyZd..GrA.0.0.BqwNlt.AWegPj-OCsq4jU5OyUwbGaoJ9oo; "
-    "wd=360x616"
+    "61562610920837%3A5TQgo8d28i; "
+    "wd=360x800; "
+    "c_user=61595197311852; "
+    "xs=43%3AbObftd0SQ41NwQ%3A2%3A1791026979%3A-1%3A-1; "
+    "fr=0ZX5mgCABu4MTVFSz.AWctLZJb6K4_hw9XFaCu-XYuAOP67e-8zsX_rlom8pct6KZHMSg"
+    ".BqvyZd..AAA.0.0.BqwOcq.AWePPR565PNwOsO5kpidAw2KPi4; "
+    "locale=en_GB; "
+    "fbl_st=101422426%3BT%3A29850449; "
+    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791026986"
 )
 
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
@@ -94,6 +97,7 @@ def cookie_summary(cookies):
         "xs_prefix": d.get('xs', '?')[:20],
         "datr": d.get('datr', '?')[:20],
         "locale": d.get('locale', '?'),
+        "wd": d.get('wd', '(none)'),
         "has_sb": 'sb' in d,
         "has_fr": 'fr' in d,
         "has_pas": 'pas' in d,
@@ -488,7 +492,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     log(f"  ✓ Browser launch OK sau {int((time.time()-session_t0)*10)/10}s")
 
     context = browser.new_context(
-        viewport={"width": 1920, "height": 1080}, locale="vi-VN",
+        viewport={"width": 1920, "height": 1080}, locale="en-US",
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
@@ -792,7 +796,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 # ============================================================
 def main():
     log("=" * 60)
-    log(">>> FB SAM LOC BOT v14 — FULL LOGGING <<<")
+    log(">>> FB SAM LOC BOT v14 — TEST ACCOUNT 61595197311852 <<<")
     log("=" * 60)
     log(f"Config:")
     log(f"  GAME_URL={GAME_URL}")
@@ -819,6 +823,7 @@ def main():
     log(f"  xs_prefix={summary['xs_prefix']}")
     log(f"  datr={summary['datr']}")
     log(f"  locale={summary['locale']}")
+    log(f"  wd={summary['wd']}")
     log(f"  has_sb={summary['has_sb']} has_fr={summary['has_fr']} has_pas={summary['has_pas']}")
 
     grand_total = 0
