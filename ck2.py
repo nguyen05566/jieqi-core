@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v13c — URL desktop duy nhất, cookie c_user=61562610920837."""
-import os, sys, time
+"""FB Sam loc reward bot v14 — LOGGING ĐẦY ĐỦ + redirect detection.
+Cookie hardcode. URL desktop duy nhất. Chạy vòng lặp vô hạn.
+"""
+import os, sys, time, json, traceback
+from datetime import datetime
 
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -9,6 +12,18 @@ except Exception:
     m = None
 
 from playwright.sync_api import sync_playwright
+
+
+# ============================================================
+# LOG HELPER — timestamp mọi dòng
+# ============================================================
+def log(msg, tag=""):
+    ts = datetime.now().strftime("%H:%M:%S")
+    prefix = f"[{ts}]"
+    if tag:
+        prefix += f" [{tag}]"
+    print(f"{prefix} {msg}", flush=True)
+
 
 # ============================================================
 # >>> COOKIE <<<
@@ -29,11 +44,11 @@ COOKIE_RAW = (
     "wd=360x616"
 )
 
-# ============================================================
-# URL GAME — CHỈ DESKTOP
-# ============================================================
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
 
+# ============================================================
+# CONFIG
+# ============================================================
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "40"))
 DELAY = float(os.environ.get("COOLDOWN", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))
@@ -46,16 +61,24 @@ PRE_CLAIM_TRANSFER_THRESHOLD = int(
     os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000")
 )
 
+# Screenshot dir
+SHOT_DIR = os.environ.get("SHOT_DIR", ".")
 
+
+# ============================================================
+# PARSE COOKIE
+# ============================================================
 def parse_cookie(raw: str):
     raw = raw.strip().strip('"').strip("'")
     raw = " ".join(raw.split())
     raw = raw.replace(";  ", "; ").replace(" ;", ";")
+
     if m is not None and hasattr(m, "parse_cookie_header"):
         try:
             return m.parse_cookie_header(raw)
         except Exception:
             pass
+
     import http.cookies
     parsed = http.cookies.SimpleCookie()
     parsed.load(raw)
@@ -66,6 +89,25 @@ def parse_cookie(raw: str):
     ]
 
 
+def cookie_summary(cookies):
+    """Tóm tắt cookie — in ra những field quan trọng."""
+    d = {c['name']: c['value'] for c in cookies}
+    summary = {
+        "count": len(cookies),
+        "c_user": d.get('c_user', '?')[:20],
+        "xs_prefix": d.get('xs', '?')[:20],
+        "datr": d.get('datr', '?')[:20],
+        "locale": d.get('locale', '?'),
+        "has_sb": 'sb' in d,
+        "has_fr": 'fr' in d,
+        "has_pas": 'pas' in d,
+    }
+    return summary
+
+
+# ============================================================
+# HELPER
+# ============================================================
 def parse_balance_num(bal_text):
     if not bal_text or bal_text == '?':
         return 0
@@ -89,24 +131,101 @@ def get_bal(gf):
         return "?"
 
 
+def get_page_url(page):
+    try:
+        return page.url
+    except Exception:
+        return "?"
+
+
+def log_all_frames(page, tag=""):
+    """Log tất cả frame URL — dùng để debug."""
+    try:
+        frames = page.frames
+        log(f"  Có {len(frames)} frame:", tag)
+        for i, f in enumerate(frames):
+            url = f.url[:180] if f.url else "(empty)"
+            try:
+                name = f.name or "(noname)"
+            except Exception:
+                name = "(?)"
+            log(f"    [{i}] name={name} | {url}", tag)
+    except Exception as e:
+        log(f"  Lỗi log frames: {e}", tag)
+
+
+def screenshot(page, name):
+    """Chụp màn hình, trả về đường dẫn."""
+    try:
+        path = os.path.join(SHOT_DIR, name)
+        page.screenshot(path=path, full_page=False)
+        log(f"  📸 Screenshot: {path}")
+        return path
+    except Exception as e:
+        log(f"  ⚠ Không chụp được screenshot: {e}")
+        return None
+
+
+def detect_redirect(page):
+    """Phát hiện FB đá về gaming hub thay vì mở game."""
+    try:
+        url = page.url
+        # URL redirect đặc trưng: /gaming/play/?game_session_id=...
+        if "gaming/play/?" in url and "sam_loc" not in url:
+            return True, url
+        # Bất kỳ redirect nào không chứa sam_loc
+        if "gaming/play" in url and "sam_loc" not in url:
+            return True, url
+        return False, url
+    except Exception:
+        return False, "?"
+
+
 def find_gf(page, max_wait=120):
-    for _ in range(max_wait // 5):
+    """Tìm game frame, phát hiện redirect."""
+    start = time.time()
+    last_log = 0
+    for i in range(max_wait // 5):
+        # Check redirect trước
+        redirected, cur_url = detect_redirect(page)
+        if redirected:
+            log(f"  ⚠ FB REDIRECT phát hiện: {cur_url[:100]}")
+            log(f"  ⚠ Account KHÔNG được phép vào game Sam Lốc")
+            return "REDIRECT"
+
+        # Log mỗi 15s tiến độ
+        elapsed = int(time.time() - start)
+        if elapsed - last_log >= 15:
+            last_log = elapsed
+            n_frames = len(page.frames)
+            log(f"  ⏳ Đang tìm frame game... ({elapsed}s, {n_frames} frame)")
+
         for f in page.frames:
             if "instant-bundle" in f.url and "fbsbx.com" in f.url:
+                log(f"  ✓ Tìm thấy game frame sau {int(time.time()-start)}s")
                 return f
         time.sleep(5)
+
+    log(f"  ✗ Hết {max_wait}s không tìm thấy game frame")
     return None
 
 
-def debug_frames(page, tag=""):
-    print(f"  [DEBUG{(' '+tag) if tag else ''}] Frames hiện có:", flush=True)
-    for i, f in enumerate(page.frames):
-        print(f"    [{i}] {f.url[:150]}", flush=True)
+def is_account_blocked(gf):
     try:
-        page.screenshot(path="debug_fail.png", full_page=False)
-        print("  [DEBUG] Screenshot: debug_fail.png", flush=True)
+        blocked = gf.evaluate("""() => {
+            const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
+            for (const d of dialogs) {
+                if (d.offsetParent === null) continue;
+                const txt = (d.textContent || '').toLowerCase();
+                if (txt.includes('blocked') || txt.includes('khóa') || txt.includes('cấm')) {
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        return bool(blocked)
     except Exception:
-        pass
+        return False
 
 
 def dismiss_popups(page):
@@ -139,27 +258,36 @@ def dismiss_popups(page):
         except Exception:
             break
     if clicked:
-        print(f"  Đã đóng {clicked} popup/button", flush=True)
+        log(f"  Đã đóng {clicked} popup/button")
+    return clicked
 
 
 def reload_game_page(page):
-    print("  ⟳ Reload page (send timed out)...", flush=True)
+    log("  ⟳ Reload page...")
+    t0 = time.time()
     try:
         page.reload(wait_until="domcontentloaded", timeout=60000)
+        log(f"  Reload xong sau {int(time.time()-t0)}s")
+        log(f"  URL sau reload: {get_page_url(page)}")
         page.wait_for_timeout(20000)
+        dismiss_popups(page)
         new_gf = find_gf(page, max_wait=60)
-        if new_gf:
-            print("  ✓ Game reloaded", flush=True)
+        if new_gf and new_gf != "REDIRECT":
+            log("  ✓ Game reloaded OK")
             page.wait_for_timeout(10000)
             return new_gf
-        print("  ✗ Game frame not found after reload", flush=True)
         return None
     except Exception as e:
-        print(f"  ✗ Reload error: {e}", flush=True)
+        log(f"  ✗ Reload error: {e}")
         return None
 
 
+# ============================================================
+# TRANSFER
+# ============================================================
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
+    log(f"  → Bắt đầu transfer tới {dest_id}...")
+    t0 = time.time()
     try:
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
@@ -207,17 +335,24 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                 }
             });
         }""", dest_id)
+        elapsed = int((time.time() - t0) * 10) / 10
+        log(f"  ← Transfer xong sau {elapsed}s: {json.dumps(result, ensure_ascii=False)[:200]}")
         return result
     except Exception as e:
+        log(f"  ✗ Transfer exception: {e}")
         return {"success": False, "error": f"evaluate error: {e}"}
 
 
+# ============================================================
+# CLAIM
+# ============================================================
 def trigger_and_claim(gf):
     try:
         gf.evaluate("createTable()")
     except Exception:
         pass
     time.sleep(2)
+
     try:
         gf.evaluate("""() => {
             const r = document.getElementById('radio_11');
@@ -226,6 +361,7 @@ def trigger_and_claim(gf):
     except Exception:
         pass
     time.sleep(0.5)
+
     try:
         gf.evaluate("""() => {
             const b = document.querySelector('input[name="CREATE"]');
@@ -255,6 +391,7 @@ def trigger_and_claim(gf):
         }""")
     except Exception:
         pass
+
     if alert_clicked:
         time.sleep(2)
 
@@ -308,8 +445,7 @@ def trigger_and_claim(gf):
 
         if attempt < max_attempts - 1:
             err = result.get('error', 'unknown')
-            print(f"    attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...",
-                  flush=True)
+            log(f"    attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...")
             try:
                 gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
             except Exception:
@@ -342,26 +478,46 @@ def trigger_and_claim(gf):
     return result or {"success": False, "error": "no result"}
 
 
+# ============================================================
+# SESSION
+# ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at):
-    print(f"\n########## SESSION {session_id} ##########", flush=True)
+    session_t0 = time.time()
+    log("=" * 60)
+    log(f"########## SESSION {session_id} ##########")
+    log("=" * 60)
 
-    browser = p.chromium.launch(
-        headless=HEADLESS,
-        args=["--no-sandbox", "--disable-dev-shm-usage",
-              "--disable-blink-features=AutomationControlled"],
-    )
+    # ===== Launch browser =====
+    log("[LAUNCH] Khởi tạo browser...")
+    try:
+        browser = p.chromium.launch(
+            headless=HEADLESS,
+            args=["--no-sandbox", "--disable-dev-shm-usage",
+                  "--disable-blink-features=AutomationControlled"],
+        )
+    except Exception as e:
+        log(f"  ✗ Launch error: {e}")
+        return 0, 0, 0, False
+
+    log(f"  ✓ Browser launch OK sau {int((time.time()-session_t0)*10)/10}s")
+
     context = browser.new_context(
         viewport={"width": 1920, "height": 1080}, locale="vi-VN",
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
     )
+    log("  ✓ Context tạo OK")
+
+    # ===== Add cookies =====
+    log(f"[COOKIE] Thêm {len(fb_cookies)} cookie vào context...")
     try:
         for c in fb_cookies:
             c['domain'] = '.facebook.com'
         context.add_cookies(fb_cookies)
+        log("  ✓ add_cookies OK")
     except Exception as e:
-        print(f"  ERROR add_cookies: {e}", flush=True)
+        log(f"  ✗ add_cookies error: {e}")
         try:
             browser.close()
         except Exception:
@@ -369,132 +525,209 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         return 0, 0, 0, False
 
     page = context.new_page()
+    log("  ✓ Page tạo OK")
 
-    # Login check
-    print("[1] Login FB...", flush=True)
+    # ===== Login check =====
+    log("[1] Login FB...")
+    t0 = time.time()
     try:
         page.goto("https://www.facebook.com/",
                   wait_until="domcontentloaded", timeout=30000)
+        log(f"  ✓ goto facebook.com OK sau {int((time.time()-t0)*10)/10}s")
     except Exception as e:
-        print(f"  ERROR goto FB: {e}", flush=True)
+        log(f"  ✗ goto FB error: {e}")
         try:
             browser.close()
         except Exception:
             pass
         return 0, 0, 0, False
 
+    log(f"  URL: {get_page_url(page)}")
     page.wait_for_timeout(5000)
+    log(f"  URL sau 5s: {get_page_url(page)}")
 
+    # Check login form
     try:
-        if page.locator('input[placeholder="Email or phone"]').count() > 0:
-            print("  ERROR: Not logged in (cookie hết hạn?)", flush=True)
+        login_inputs = page.locator('input[placeholder="Email or phone"]').count()
+        log(f"  Login form inputs: {login_inputs}")
+        if login_inputs > 0:
+            log("  ✗ NOT LOGGED IN (cookie hết hạn?)")
+            screenshot(page, f"session{session_id}_not_logged.png")
             browser.close()
             return 0, 0, 0, False
+    except Exception as e:
+        log(f"  Check login form error: {e}")
+
+    # Check checkpoint
+    cur_url = get_page_url(page)
+    if "checkpoint" in cur_url or "/login" in cur_url:
+        log(f"  ✗ FB CHECKPOINT: {cur_url}")
+        screenshot(page, f"session{session_id}_checkpoint.png")
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, False
+
+    log("  ✓ Login OK")
+
+    # ===== Open game =====
+    log(f"[2] Open game: {GAME_URL}")
+    t0 = time.time()
+    try:
+        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
+        log(f"  ✓ goto game OK sau {int((time.time()-t0)*10)/10}s")
+    except Exception as e:
+        log(f"  ✗ goto game error: {e}")
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, True
+
+    log(f"  URL ngay sau goto: {get_page_url(page)}")
+
+    log("  Đợi 20s cho game load...")
+    page.wait_for_timeout(20000)
+
+    log(f"  URL sau 20s: {get_page_url(page)}")
+
+    # Check redirect sớm
+    redirected, cur_url = detect_redirect(page)
+    if redirected:
+        log(f"  ⚠ REDIRECT sớm: {cur_url[:120]}")
+        log("  Account có thể không được phép vào game")
+
+    log("  Thử dismiss popups...")
+    dismiss_popups(page)
+    page.wait_for_timeout(2000)
+    log(f"  URL sau dismiss: {get_page_url(page)}")
+
+    # Log all frames để debug
+    log_all_frames(page, "SAU-KHI-VAO-GAME")
+
+    # ===== Find game frame =====
+    log("[2b] Tìm game frame...")
+    gf = find_gf(page, max_wait=60)
+
+    if gf == "REDIRECT":
+        log("  ❌ ACCOUNT KHÔNG VÀO ĐƯỢC GAME (redirect)")
+        screenshot(page, f"session{session_id}_redirect.png")
+        log_all_frames(page, "REDIRECT")
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, False  # cookies_ok=False → báo cần đổi account
+
+    if not gf:
+        log("  Game frame chưa thấy, thử reload 1 lần...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=60000)
+            log(f"  Reload xong, URL: {get_page_url(page)}")
+            page.wait_for_timeout(25000)
+            dismiss_popups(page)
+            log_all_frames(page, "SAU-RELOAD")
+            gf = find_gf(page, max_wait=60)
+        except Exception as e:
+            log(f"  Reload error: {e}")
+
+    if not gf or gf == "REDIRECT":
+        log("  ❌ ERROR: Game frame not found sau reload")
+        screenshot(page, f"session{session_id}_fail.png")
+        log_all_frames(page, "FAIL")
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, True
+
+    log("  ✓ Game loaded")
+
+    # Log frame game URL
+    try:
+        log(f"  Game frame URL: {gf.url[:150]}")
     except Exception:
         pass
 
-    cur_url = page.url
-    if "checkpoint" in cur_url or "/login" in cur_url:
-        print(f"  ❌ FB CHECKPOINT: {cur_url}", flush=True)
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return 0, 0, 0, False
-
-    print("  OK", flush=True)
-
-    # Open game
-    print(f"[2] Open game: {GAME_URL}", flush=True)
-    try:
-        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
-    except Exception as e:
-        print(f"  ERROR goto game: {e}", flush=True)
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return 0, 0, 0, True
-
-    page.wait_for_timeout(20000)
-    dismiss_popups(page)
-    page.wait_for_timeout(2000)
-
-    gf = find_gf(page, max_wait=60)
-    if not gf:
-        print("  Game frame chưa thấy, thử reload 1 lần...", flush=True)
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(25000)
-            dismiss_popups(page)
-            gf = find_gf(page, max_wait=60)
-        except Exception as e:
-            print(f"  Reload error: {e}", flush=True)
-
-    if not gf:
-        print("  ❌ ERROR: Game frame not found", flush=True)
-        debug_frames(page, "fail")
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return 0, 0, 0, True
-
-    print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
-    # Wait connection
-    print("[3] Wait connection object...", flush=True)
+    # ===== Wait connection =====
+    log("[3] Wait connection object...")
     connection_ready = False
-    for _ in range(20):
+    for i in range(20):
         try:
             has_conn = gf.evaluate(
                 "() => !!(window.connection && typeof connection.send === 'function')"
             )
             if has_conn:
-                print("  connection.send available", flush=True)
+                log(f"  ✓ connection.send available sau {i*3}s")
                 connection_ready = True
                 break
+            elif i % 5 == 0:
+                log(f"  ⏳ Đợi connection... ({i*3}s)")
+        except Exception as e:
+            if i % 5 == 0:
+                log(f"  ⏳ Evaluate error ({i*3}s): {str(e)[:80]}")
+        time.sleep(3)
+
+    if not connection_ready:
+        log("  ⚠ connection.send chưa có — vẫn thử claim")
+
+    # ===== Blocked check =====
+    if is_account_blocked(gf):
+        log("  ❌ ACCOUNT BLOCKED — bỏ qua")
+        screenshot(page, f"session{session_id}_blocked.png")
+        try:
+            gf.evaluate("""() => {
+                const btns = document.querySelectorAll('input[type="button"], button');
+                for (const b of btns) {
+                    const t = (b.value || b.textContent || '').toLowerCase().trim();
+                    if (t === 'ok' || t === 'đóng' || t === 'close') b.click();
+                }
+            }""")
         except Exception:
             pass
-        time.sleep(3)
-    if not connection_ready:
-        print("  ⚠ connection.send chưa có", flush=True)
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, False
 
+    # ===== Balance =====
     bal_start = get_bal(gf)
-    print(f"  Balance: {bal_start}", flush=True)
+    log(f"  Balance: {bal_start}")
 
-    # Pre-claim transfer
+    # ===== Pre-claim transfer =====
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
-        print(f"\n[Pre-claim] Balance {bal_start_num:,} > "
-              f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, transfer trước...", flush=True)
+        log(f"[Pre-claim] Balance {bal_start_num:,} > "
+            f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, transfer trước...")
         pre = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
         if pre.get('success'):
             amt = pre.get('balance', 0)
-            print(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}",
-                  flush=True)
+            log(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}")
             time.sleep(2)
             bal_start = get_bal(gf)
-            print(f"     Balance sau pre-transfer: {bal_start}", flush=True)
+            log(f"     Balance sau pre-transfer: {bal_start}")
         else:
-            print(f"  ❌ Pre-claim transfer fail: {pre.get('error', 'unknown')}",
-                  flush=True)
+            log(f"  ❌ Pre-claim transfer fail: {pre.get('error', 'unknown')}")
     elif bal_start_num > 0:
-        print(f"  (Balance {bal_start_num:,} ≤ "
-              f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)", flush=True)
+        log(f"  (Balance {bal_start_num:,} ≤ "
+            f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)")
 
-    # Reward loop
-    print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
+    # ===== Reward loop =====
+    log(f"[4] Reward loop ({MAX_CYCLES} cycles)...")
     total = 0
     ok = 0
     fail = 0
     consecutive_timeouts = 0
     MAX_CONSECUTIVE_TIMEOUTS = 5
+    loop_t0 = time.time()
 
     for i in range(MAX_CYCLES):
         if time.time() - started_at > MAX_RUNTIME:
-            print("  Hết thời gian cho phép, dừng session.", flush=True)
+            log("  ⏰ Hết thời gian, dừng session.")
             break
 
         bal_before = get_bal(gf)
@@ -504,15 +737,17 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             pass
         time.sleep(1)
 
+        claim_t0 = time.time()
         try:
             result = trigger_and_claim(gf)
         except Exception as e:
-            print(f"  {i+1}: EXCEPTION ({e})", flush=True)
+            log(f"  {i+1}: EXCEPTION ({str(e)[:80]})")
             fail += 1
             if fail >= 8:
                 break
             time.sleep(DELAY)
             continue
+        claim_elapsed = int((time.time() - claim_t0) * 10) / 10
 
         if result.get('success') and result.get('amount', 0) > 0:
             amount = result['amount']
@@ -521,53 +756,56 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             consecutive_timeouts = 0
             time.sleep(1)
             bal_after = get_bal(gf)
-            print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}",
-                  flush=True)
+            log(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | "
+                f"total={total} | {claim_elapsed}s")
             fail = 0
         else:
             fail += 1
             err = result.get('error', 'unknown')
-            print(f"  {i+1}: FAIL ({err}) | {bal_before}", flush=True)
+            log(f"  {i+1}: FAIL ({err}) | {bal_before} | {claim_elapsed}s")
+
             if 'timeout' in str(err).lower():
                 consecutive_timeouts += 1
                 if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
-                    print(f"  ⚠ {consecutive_timeouts} timeouts liên tiếp — reload...",
-                          flush=True)
+                    log(f"  ⚠ {consecutive_timeouts} timeouts liên tiếp — reload...")
                     new_gf = reload_game_page(page)
-                    if new_gf:
+                    if new_gf and new_gf != "REDIRECT":
                         gf = new_gf
                     consecutive_timeouts = 0
             else:
                 consecutive_timeouts = 0
 
         if fail >= 8:
-            print("  Too many fails, stopping session", flush=True)
+            log("  ⚠ Quá nhiều fail, dừng session")
             break
 
         if i < MAX_CYCLES - 1:
             time.sleep(DELAY)
 
+    loop_elapsed = int(time.time() - loop_t0)
     bal_end = get_bal(gf)
-    print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
-          f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
+    log(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
+        f"balance {bal_start} -> {bal_end} | reward={total} | "
+        f"loop_elapsed={loop_elapsed}s")
 
+    # ===== Transfer cuối =====
     if TRANSFER_ENABLED and total > 0:
-        print(f"\n[SESSION {session_id}] === TRANSFER ALL → "
-              f"{TRANSFER_DEST_ID} ===", flush=True)
+        log(f"[SESSION {session_id}] === TRANSFER ALL → {TRANSFER_DEST_ID} ===")
         time.sleep(2)
         tr = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
         if tr.get('success'):
             amt = tr.get('balance', 0)
-            print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
+            log(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}")
             time.sleep(2)
-            print(f"     Balance sau transfer: {get_bal(gf)}", flush=True)
+            log(f"     Balance sau transfer: {get_bal(gf)}")
         else:
             err = tr.get('error', 'unknown')
             bal_at = tr.get('balance', 0)
-            print(f"  ⚠ Transfer fail: {err} (balance was {bal_at})", flush=True)
-            print(f"     → Sẽ transfer ở session sau (pre-claim)", flush=True)
+            log(f"  ⚠ Transfer fail: {err} (balance was {bal_at})")
+            log(f"     → Sẽ transfer ở session sau (pre-claim)")
 
-    print(f"[SESSION {session_id}] Đóng browser...", flush=True)
+    session_elapsed = int(time.time() - session_t0)
+    log(f"[SESSION {session_id}] Đóng browser (total {session_elapsed}s)...")
     try:
         browser.close()
     except Exception:
@@ -576,53 +814,57 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     return total, ok, fail, True
 
 
+# ============================================================
+# MAIN
+# ============================================================
 def main():
-    print(f"Config: c_user=61562610920837 | GAME_URL={GAME_URL} "
-          f"MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s "
-          f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}",
-          flush=True)
+    log("=" * 60)
+    log(">>> FB SAM LOC BOT v14 — FULL LOGGING <<<")
+    log("=" * 60)
+    log(f"Config:")
+    log(f"  GAME_URL={GAME_URL}")
+    log(f"  MAX_CLAIMS={MAX_CYCLES}")
+    log(f"  COOLDOWN={DELAY}s")
+    log(f"  MAX_RUNTIME={MAX_RUNTIME}s")
+    log(f"  HEADLESS={HEADLESS}")
+    log(f"  SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s")
+    log(f"  TRANSFER_ENABLED={TRANSFER_ENABLED}")
+    log(f"  TRANSFER_DEST_ID={TRANSFER_DEST_ID}")
+    log(f"  PRE_CLAIM_THRESHOLD={PRE_CLAIM_TRANSFER_THRESHOLD}")
+    log(f"  Python={sys.version.split()[0]}")
+    log(f"  CWD={os.getcwd()}")
 
     fb_cookies = parse_cookie(COOKIE_RAW)
     if not fb_cookies:
-        print("[STOP] Parse cookie thất bại.", flush=True)
+        log("[STOP] Parse cookie thất bại.")
         return 1
-    print(f"[COOKIE] Parse {len(fb_cookies)} cookie OK.", flush=True)
+
+    summary = cookie_summary(fb_cookies)
+    log(f"[COOKIE] Summary:")
+    log(f"  count={summary['count']}")
+    log(f"  c_user={summary['c_user']}")
+    log(f"  xs_prefix={summary['xs_prefix']}")
+    log(f"  datr={summary['datr']}")
+    log(f"  locale={summary['locale']}")
+    log(f"  has_sb={summary['has_sb']} has_fr={summary['has_fr']} has_pas={summary['has_pas']}")
 
     grand_total = 0
     grand_ok = 0
     session_id = 0
+    run_fail_count = 0
 
     with sync_playwright() as p:
         while True:
             session_id += 1
-            print(f"\n{'='*60}", flush=True)
-            print(f">>> RUN #{session_id}  |  {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                  flush=True)
-            print(f"{'='*60}", flush=True)
+            log("")
+            log("█" * 60)
+            log(f"█ RUN #{session_id}  |  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            log("█" * 60)
 
             run_started = time.time()
             try:
                 total, ok, fail, cookies_ok = run_one_session(
                     p, fb_cookies, session_id, run_started
                 )
-            except Exception as e:
-                print(f"[ERROR] session {session_id}: {e}", flush=True)
-                total, ok, fail, cookies_ok = 0, 0, 0, False
-
-            grand_total += total
-            grand_ok += ok
-
-            print(f"[RUN #{session_id}] Luỹ kế: {grand_ok} claim ok | "
-                  f"{grand_total} coin", flush=True)
-
-            print(f"[REST] Nghỉ {SLEEP_BETWEEN_RUNS}s rồi chạy lại...",
-                  flush=True)
-            time.sleep(SLEEP_BETWEEN_RUNS)
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main())
-    except KeyboardInterrupt:
-        print("\n[STOP] Người dùng dừng (Ctrl+C).", flush=True)
-        sys.exit(0)
+                if cookies_ok:
+                    run_fail_count = 
