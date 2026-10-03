@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v14 — test cookie account 61595197311852.
-Logging đầy đủ, redirect detection, chạy vòng lặp vô hạn.
+"""FB Game reward bot v15 — URL game 2841623646051191 (Invasion 2021).
+Cookie account 61595197311852. Full logging.
 """
 import os, sys, time, json
 from datetime import datetime
@@ -14,9 +14,6 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 
-# ============================================================
-# LOG HELPER
-# ============================================================
 def log(msg, tag=""):
     ts = datetime.now().strftime("%H:%M:%S")
     prefix = f"[{ts}]"
@@ -26,7 +23,7 @@ def log(msg, tag=""):
 
 
 # ============================================================
-# >>> COOKIE — ACCOUNT 61595197311852 <<<
+# >>> COOKIE — account 61595197311852 <<<
 # ============================================================
 COOKIE_RAW = (
     "sb=XSa_ahbAv9XMUHfep4z2jQUb; m_pixel_ratio=2; vpd=v1%3B616x360x2; "
@@ -35,17 +32,20 @@ COOKIE_RAW = (
     "61594960651753%3Aci75sCyaff%2C61594746041618%3AiAAzWgyfvh%2C"
     "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV%2C"
     "61562610920837%3A5TQgo8d28i; "
-    "wd=360x800; "
     "c_user=61595197311852; "
     "xs=43%3AbObftd0SQ41NwQ%3A2%3A1791026979%3A-1%3A-1; "
     "fr=0ZX5mgCABu4MTVFSz.AWctLZJb6K4_hw9XFaCu-XYuAOP67e-8zsX_rlom8pct6KZHMSg"
     ".BqvyZd..AAA.0.0.BqwOcq.AWePPR565PNwOsO5kpidAw2KPi4; "
     "locale=en_GB; "
     "fbl_st=101422426%3BT%3A29850449; "
-    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791026986"
+    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791026986; "
+    "wd=360x616"
 )
 
-GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
+# ============================================================
+# >>> URL GAME MỚI — 2841623646051191 <<<
+# ============================================================
+GAME_URL = "https://www.facebook.com/gaming/play/2841623646051191/?context_source_id=&context_type=SOLO&payload=&source=game_switch"
 
 # ============================================================
 # CONFIG
@@ -98,9 +98,6 @@ def cookie_summary(cookies):
         "datr": d.get('datr', '?')[:20],
         "locale": d.get('locale', '?'),
         "wd": d.get('wd', '(none)'),
-        "has_sb": 'sb' in d,
-        "has_fr": 'fr' in d,
-        "has_pas": 'pas' in d,
     }
 
 
@@ -142,12 +139,8 @@ def log_all_frames(page, tag=""):
         frames = page.frames
         log(f"  Có {len(frames)} frame:", tag)
         for i, f in enumerate(frames):
-            url = f.url[:180] if f.url else "(empty)"
-            try:
-                name = f.name or "(noname)"
-            except Exception:
-                name = "(?)"
-            log(f"    [{i}] name={name} | {url}", tag)
+            url = f.url[:200] if f.url else "(empty)"
+            log(f"    [{i}] {url}", tag)
     except Exception as e:
         log(f"  Lỗi log frames: {e}", tag)
 
@@ -159,41 +152,36 @@ def screenshot(page, name):
         log(f"  📸 Screenshot: {path}")
         return path
     except Exception as e:
-        log(f"  ⚠ Không chụp được screenshot: {e}")
+        log(f"  ⚠ Không chụp được: {e}")
         return None
 
 
-def detect_redirect(page):
-    try:
-        url = page.url
-        if "gaming/play/?" in url and "sam_loc" not in url:
-            return True, url
-        if "gaming/play" in url and "sam_loc" not in url:
-            return True, url
-        return False, url
-    except Exception:
-        return False, "?"
-
-
 def find_gf(page, max_wait=120):
+    """Tìm iframe game — match nhiều pattern."""
     start = time.time()
     last_log = 0
     for i in range(max_wait // 5):
-        redirected, cur_url = detect_redirect(page)
-        if redirected:
-            log(f"  ⚠ FB REDIRECT phát hiện: {cur_url[:100]}")
-            log(f"  ⚠ Account KHÔNG được phép vào game Sam Lốc")
-            return "REDIRECT"
-
         elapsed = int(time.time() - start)
         if elapsed - last_log >= 15:
             last_log = elapsed
-            n_frames = len(page.frames)
-            log(f"  ⏳ Đang tìm frame game... ({elapsed}s, {n_frames} frame)")
+            log(f"  ⏳ Đang tìm frame game... ({elapsed}s, {len(page.frames)} frame)")
 
         for f in page.frames:
-            if "instant-bundle" in f.url and "fbsbx.com" in f.url:
-                log(f"  ✓ Tìm thấy game frame sau {int(time.time()-start)}s")
+            url = f.url
+            # Match các pattern iframe game
+            if "shield-apps-" in url and "fbsbx.com" in url:
+                log(f"  ✓ Tìm thấy game frame (shield-apps) sau {int(time.time()-start)}s")
+                log(f"    URL: {url[:150]}")
+                return f
+            if "apps-" in url and "fbsbx.com" in url:
+                log(f"  ✓ Tìm thấy game frame (apps-) sau {int(time.time()-start)}s")
+                log(f"    URL: {url[:150]}")
+                return f
+            if "instant-bundle" in url and "fbsbx.com" in url:
+                log(f"  ✓ Tìm thấy game frame (instant-bundle) sau {int(time.time()-start)}s")
+                return f
+            if "fb.gg" in url and f != page.main_frame:
+                log(f"  ✓ Tìm thấy game frame (fb.gg) sau {int(time.time()-start)}s")
                 return f
         time.sleep(5)
 
@@ -251,26 +239,6 @@ def dismiss_popups(page):
     if clicked:
         log(f"  Đã đóng {clicked} popup/button")
     return clicked
-
-
-def reload_game_page(page):
-    log("  ⟳ Reload page...")
-    t0 = time.time()
-    try:
-        page.reload(wait_until="domcontentloaded", timeout=60000)
-        log(f"  Reload xong sau {int(time.time()-t0)}s")
-        log(f"  URL sau reload: {get_page_url(page)}")
-        page.wait_for_timeout(20000)
-        dismiss_popups(page)
-        new_gf = find_gf(page, max_wait=60)
-        if new_gf and new_gf != "REDIRECT":
-            log("  ✓ Game reloaded OK")
-            page.wait_for_timeout(10000)
-            return new_gf
-        return None
-    except Exception as e:
-        log(f"  ✗ Reload error: {e}")
-        return None
 
 
 # ============================================================
@@ -489,7 +457,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         log(f"  ✗ Launch error: {e}")
         return 0, 0, 0, False
 
-    log(f"  ✓ Browser launch OK sau {int((time.time()-session_t0)*10)/10}s")
+    log(f"  ✓ Browser OK sau {int((time.time()-session_t0)*10)/10}s")
 
     context = browser.new_context(
         viewport={"width": 1920, "height": 1080}, locale="en-US",
@@ -497,9 +465,9 @@ def run_one_session(p, fb_cookies, session_id, started_at):
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
     )
-    log("  ✓ Context tạo OK")
+    log("  ✓ Context OK")
 
-    log(f"[COOKIE] Thêm {len(fb_cookies)} cookie vào context...")
+    log(f"[COOKIE] Thêm {len(fb_cookies)} cookie...")
     try:
         for c in fb_cookies:
             c['domain'] = '.facebook.com'
@@ -514,15 +482,14 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         return 0, 0, 0, False
 
     page = context.new_page()
-    log("  ✓ Page tạo OK")
+    log("  ✓ Page OK")
 
-    # ===== Login check =====
+    # Login
     log("[1] Login FB...")
-    t0 = time.time()
     try:
         page.goto("https://www.facebook.com/",
                   wait_until="domcontentloaded", timeout=30000)
-        log(f"  ✓ goto facebook.com OK sau {int((time.time()-t0)*10)/10}s")
+        log(f"  ✓ goto FB OK")
     except Exception as e:
         log(f"  ✗ goto FB error: {e}")
         try:
@@ -539,16 +506,16 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         login_inputs = page.locator('input[placeholder="Email or phone"]').count()
         log(f"  Login form inputs: {login_inputs}")
         if login_inputs > 0:
-            log("  ✗ NOT LOGGED IN (cookie hết hạn?)")
+            log("  ✗ NOT LOGGED IN")
             screenshot(page, f"session{session_id}_not_logged.png")
             browser.close()
             return 0, 0, 0, False
     except Exception as e:
-        log(f"  Check login form error: {e}")
+        log(f"  Check login error: {e}")
 
     cur_url = get_page_url(page)
     if "checkpoint" in cur_url or "/login" in cur_url:
-        log(f"  ✗ FB CHECKPOINT: {cur_url}")
+        log(f"  ✗ CHECKPOINT: {cur_url}")
         screenshot(page, f"session{session_id}_checkpoint.png")
         try:
             browser.close()
@@ -558,8 +525,9 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 
     log("  ✓ Login OK")
 
-    # ===== Open game =====
-    log(f"[2] Open game: {GAME_URL}")
+    # Open game
+    log(f"[2] Open game URL...")
+    log(f"  {GAME_URL[:120]}...")
     t0 = time.time()
     try:
         page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
@@ -572,39 +540,24 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             pass
         return 0, 0, 0, True
 
-    log(f"  URL ngay sau goto: {get_page_url(page)}")
+    log(f"  URL sau goto: {get_page_url(page)}")
     log("  Đợi 20s cho game load...")
     page.wait_for_timeout(20000)
     log(f"  URL sau 20s: {get_page_url(page)}")
 
-    redirected, cur_url = detect_redirect(page)
-    if redirected:
-        log(f"  ⚠ REDIRECT sớm: {cur_url[:120]}")
-        log("  Account có thể không được phép vào game")
-
-    log("  Thử dismiss popups...")
+    log("  Dismiss popups...")
     dismiss_popups(page)
     page.wait_for_timeout(2000)
     log(f"  URL sau dismiss: {get_page_url(page)}")
 
     log_all_frames(page, "SAU-KHI-VAO-GAME")
 
-    # ===== Find game frame =====
+    # Find game frame
     log("[2b] Tìm game frame...")
     gf = find_gf(page, max_wait=60)
 
-    if gf == "REDIRECT":
-        log("  ❌ ACCOUNT KHÔNG VÀO ĐƯỢC GAME (redirect)")
-        screenshot(page, f"session{session_id}_redirect.png")
-        log_all_frames(page, "REDIRECT")
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return 0, 0, 0, False
-
     if not gf:
-        log("  Game frame chưa thấy, thử reload 1 lần...")
+        log("  Frame chưa thấy, thử reload 1 lần...")
         try:
             page.reload(wait_until="domcontentloaded", timeout=60000)
             log(f"  Reload xong, URL: {get_page_url(page)}")
@@ -615,7 +568,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         except Exception as e:
             log(f"  Reload error: {e}")
 
-    if not gf or gf == "REDIRECT":
+    if not gf:
         log("  ❌ ERROR: Game frame not found sau reload")
         screenshot(page, f"session{session_id}_fail.png")
         log_all_frames(page, "FAIL")
@@ -626,14 +579,10 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         return 0, 0, 0, True
 
     log("  ✓ Game loaded")
-    try:
-        log(f"  Game frame URL: {gf.url[:150]}")
-    except Exception:
-        pass
 
     page.wait_for_timeout(10000)
 
-    # ===== Wait connection =====
+    # Wait connection
     log("[3] Wait connection object...")
     connection_ready = False
     for i in range(20):
@@ -642,7 +591,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
                 "() => !!(window.connection && typeof connection.send === 'function')"
             )
             if has_conn:
-                log(f"  ✓ connection.send available sau {i*3}s")
+                log(f"  ✓ connection.send OK sau {i*3}s")
                 connection_ready = True
                 break
             elif i % 5 == 0:
@@ -656,18 +605,8 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         log("  ⚠ connection.send chưa có — vẫn thử claim")
 
     if is_account_blocked(gf):
-        log("  ❌ ACCOUNT BLOCKED — bỏ qua")
+        log("  ❌ ACCOUNT BLOCKED")
         screenshot(page, f"session{session_id}_blocked.png")
-        try:
-            gf.evaluate("""() => {
-                const btns = document.querySelectorAll('input[type="button"], button');
-                for (const b of btns) {
-                    const t = (b.value || b.textContent || '').toLowerCase().trim();
-                    if (t === 'ok' || t === 'đóng' || t === 'close') b.click();
-                }
-            }""")
-        except Exception:
-            pass
         try:
             browser.close()
         except Exception:
@@ -677,24 +616,21 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     bal_start = get_bal(gf)
     log(f"  Balance: {bal_start}")
 
+    # Pre-claim transfer
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
-        log(f"[Pre-claim] Balance {bal_start_num:,} > "
-            f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, transfer trước...")
+        log(f"[Pre-claim] Balance {bal_start_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,}")
         pre = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
         if pre.get('success'):
             amt = pre.get('balance', 0)
             log(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}")
             time.sleep(2)
             bal_start = get_bal(gf)
-            log(f"     Balance sau pre-transfer: {bal_start}")
+            log(f"     Balance sau: {bal_start}")
         else:
             log(f"  ❌ Pre-claim transfer fail: {pre.get('error', 'unknown')}")
-    elif bal_start_num > 0:
-        log(f"  (Balance {bal_start_num:,} ≤ "
-            f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)")
 
-    # ===== Reward loop =====
+    # Reward loop
     log(f"[4] Reward loop ({MAX_CYCLES} cycles)...")
     total = 0
     ok = 0
@@ -734,8 +670,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             consecutive_timeouts = 0
             time.sleep(1)
             bal_after = get_bal(gf)
-            log(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | "
-                f"total={total} | {claim_elapsed}s")
+            log(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total} | {claim_elapsed}s")
             fail = 0
         else:
             fail += 1
@@ -746,9 +681,14 @@ def run_one_session(p, fb_cookies, session_id, started_at):
                 consecutive_timeouts += 1
                 if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
                     log(f"  ⚠ {consecutive_timeouts} timeouts liên tiếp — reload...")
-                    new_gf = reload_game_page(page)
-                    if new_gf and new_gf != "REDIRECT":
-                        gf = new_gf
+                    try:
+                        page.reload(wait_until="domcontentloaded", timeout=60000)
+                        page.wait_for_timeout(20000)
+                        new_gf = find_gf(page, max_wait=60)
+                        if new_gf:
+                            gf = new_gf
+                    except Exception as e:
+                        log(f"  Reload error: {e}")
                     consecutive_timeouts = 0
             else:
                 consecutive_timeouts = 0
@@ -766,6 +706,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         f"balance {bal_start} -> {bal_end} | reward={total} | "
         f"loop_elapsed={loop_elapsed}s")
 
+    # Final transfer
     if TRANSFER_ENABLED and total > 0:
         log(f"[SESSION {session_id}] === TRANSFER ALL → {TRANSFER_DEST_ID} ===")
         time.sleep(2)
@@ -774,12 +715,11 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             amt = tr.get('balance', 0)
             log(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}")
             time.sleep(2)
-            log(f"     Balance sau transfer: {get_bal(gf)}")
+            log(f"     Balance sau: {get_bal(gf)}")
         else:
             err = tr.get('error', 'unknown')
             bal_at = tr.get('balance', 0)
             log(f"  ⚠ Transfer fail: {err} (balance was {bal_at})")
-            log(f"     → Sẽ transfer ở session sau (pre-claim)")
 
     session_elapsed = int(time.time() - session_t0)
     log(f"[SESSION {session_id}] Đóng browser (total {session_elapsed}s)...")
@@ -796,20 +736,13 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 # ============================================================
 def main():
     log("=" * 60)
-    log(">>> FB SAM LOC BOT v14 — TEST ACCOUNT 61595197311852 <<<")
+    log(">>> FB GAME REWARD BOT v15 — 2841623646051191 <<<")
     log("=" * 60)
-    log(f"Config:")
-    log(f"  GAME_URL={GAME_URL}")
-    log(f"  MAX_CLAIMS={MAX_CYCLES}")
-    log(f"  COOLDOWN={DELAY}s")
-    log(f"  MAX_RUNTIME={MAX_RUNTIME}s")
-    log(f"  HEADLESS={HEADLESS}")
-    log(f"  SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s")
-    log(f"  TRANSFER_ENABLED={TRANSFER_ENABLED}")
-    log(f"  TRANSFER_DEST_ID={TRANSFER_DEST_ID}")
-    log(f"  PRE_CLAIM_THRESHOLD={PRE_CLAIM_TRANSFER_THRESHOLD}")
-    log(f"  Python={sys.version.split()[0]}")
-    log(f"  CWD={os.getcwd()}")
+    log(f"  GAME_URL={GAME_URL[:100]}...")
+    log(f"  MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s")
+    log(f"  MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}")
+    log(f"  TRANSFER_ENABLED={TRANSFER_ENABLED} DEST={TRANSFER_DEST_ID}")
+    log(f"  Python={sys.version.split()[0]} CWD={os.getcwd()}")
 
     fb_cookies = parse_cookie(COOKIE_RAW)
     if not fb_cookies:
@@ -818,13 +751,9 @@ def main():
 
     summary = cookie_summary(fb_cookies)
     log(f"[COOKIE] Summary:")
-    log(f"  count={summary['count']}")
-    log(f"  c_user={summary['c_user']}")
-    log(f"  xs_prefix={summary['xs_prefix']}")
-    log(f"  datr={summary['datr']}")
-    log(f"  locale={summary['locale']}")
-    log(f"  wd={summary['wd']}")
-    log(f"  has_sb={summary['has_sb']} has_fr={summary['has_fr']} has_pas={summary['has_pas']}")
+    log(f"  count={summary['count']} c_user={summary['c_user']}")
+    log(f"  xs_prefix={summary['xs_prefix']} datr={summary['datr']}")
+    log(f"  locale={summary['locale']} wd={summary['wd']}")
 
     grand_total = 0
     grand_ok = 0
@@ -855,11 +784,10 @@ def main():
             grand_total += total
             grand_ok += ok
 
-            log(f"[RUN #{session_id}] Luỹ kế: {grand_ok} claim ok | "
-                f"{grand_total} coin")
+            log(f"[RUN #{session_id}] Luỹ kế: {grand_ok} claim ok | {grand_total} coin")
 
             if not cookies_ok:
-                log("[WARN] Cookie hết hạn hoặc account không vào được game.")
+                log("[WARN] Cookie hết hạn hoặc account blocked.")
 
             log(f"[REST] Nghỉ {SLEEP_BETWEEN_RUNS}s rồi chạy lại...")
             time.sleep(SLEEP_BETWEEN_RUNS)
