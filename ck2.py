@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v13 — BỎ check WS, KHÔNG reload khi claim/transfer.
-Cookie hardcode. Vòng lặp vô hạn. Chỉ reload khi connection.send thật sự timeout.
-
-Triết lý: không tin `connection.ws.readyState` — tin `connection.send()`.
-Nếu send trả về response → OK. Nếu timeout → mới xử lý.
+"""FB Sam loc reward bot v13 — COOKIE MỚI (c_user=61562610920837).
+BỎ check WS, KHÔNG reload khi claim/transfer.
+Chỉ reload khi connection.send timeout liên tiếp >= 5 lần.
 """
 import os, sys, time
 
-# Thử import module bổ trợ nếu có (không bắt buộc)
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import board_dom_merged as m
@@ -17,21 +14,22 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # ============================================================
-# >>> COOKIE HARDCODE <<<
+# >>> COOKIE HARDCODE — ACCOUNT MỚI <<<
 # ============================================================
 COOKIE_RAW = (
     "datr=XSa_ap7Py64wLii28cJwANkb; sb=XSa_ahbAv9XMUHfep4z2jQUb; "
     "m_pixel_ratio=2; vpd=v1%3B616x360x2; ps_l=1; ps_n=1; "
-    "locale=en_GB; "
+    "c_user=61562610920837; "
+    "xs=2%3A_7XAkFKNO3TC7w%3A2%3A1791022733%3A-1%3A-1; "
+    "fr=0ZX5mgCABu4MTVFSz.AWexRjwNcz9skN0lbNRhtpio158pYERs-VufrfGcRX1eA3O3s5o"
+    ".BqvyZd..AAA.0.0.BqwNaX.AWdo5s9xFZVUcFs9LBiolEJj_9g; "
+    "locale=vi_VN; "
     "pas=61595197311852%3APOwi1i3tVJ%2C61594782729357%3AVvbK8iGoqB%2C"
     "61594960651753%3Aci75sCyaff%2C61594746041618%3AiAAzWgyfvh%2C"
-    "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV; "
-    "c_user=61594746041618; "
-    "xs=37%3AlVahnIXBe-j0vQ%3A2%3A1791016624%3A-1%3A-1; "
-    "fr=0ZX5mgCABu4MTVFSz.AWchBQGyZBrRSuTw0H5Bc66XaJrwvXxllyZDe7whN96N3sVf-ws"
-    ".BqvyZd..AAA.0.0.BqwL6z.AWdXxIGIQnrl2HJCiDOXGH1pRDI; "
-    "fbl_st=101723048%3BT%3A29850277; "
-    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791016627; "
+    "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV%2C"
+    "61562610920837%3A83znIlEigO; "
+    "fbl_st=101727469%3BT%3A29850379; "
+    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791022744; "
     "wd=360x616"
 )
 
@@ -45,7 +43,6 @@ MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 SLEEP_BETWEEN_RUNS = int(os.environ.get("SLEEP_BETWEEN_RUNS", "10"))
 
-# Transfer
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 PRE_CLAIM_TRANSFER_THRESHOLD = int(
@@ -104,7 +101,6 @@ def get_bal(gf):
 
 
 def find_gf(page, max_wait=120):
-    """Find game frame. Default 120s."""
     for _ in range(max_wait // 5):
         for f in page.frames:
             if "instant-bundle" in f.url and "fbsbx.com" in f.url:
@@ -114,7 +110,6 @@ def find_gf(page, max_wait=120):
 
 
 def is_account_blocked(gf):
-    """Check if any visible alert dialog says account is blocked."""
     try:
         blocked = gf.evaluate("""() => {
             const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
@@ -132,14 +127,8 @@ def is_account_blocked(gf):
         return False
 
 
-# ============================================================
-# >>> RELOAD PAGE (chỉ dùng khi send timeout thật sự) <<<
-# ============================================================
 def reload_game_page(page):
-    """
-    Reload page + đợi game load lại. Trả về gf mới hoặc None.
-    CHỈ gọi khi connection.send timeout — không gọi định kỳ.
-    """
+    """Reload page khi send timeout liên tiếp."""
     print("  ⟳ Reload page (send timed out)...", flush=True)
     try:
         page.reload(wait_until="domcontentloaded", timeout=60000)
@@ -147,7 +136,7 @@ def reload_game_page(page):
         new_gf = find_gf(page, max_wait=60)
         if new_gf:
             print("  ✓ Game reloaded", flush=True)
-            page.wait_for_timeout(10000)  # đợi balance sync
+            page.wait_for_timeout(10000)
             return new_gf
         print("  ✗ Game frame not found after reload", flush=True)
         return None
@@ -157,14 +146,9 @@ def reload_game_page(page):
 
 
 # ============================================================
-# >>> TRANSFER — KHÔNG check WS <<<
+# TRANSFER — KHÔNG check WS
 # ============================================================
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
-    """
-    Transfer ALL current xu về dest_id.
-    KHÔNG check ws.readyState — chỉ check connection.send có tồn tại.
-    Nếu send timeout → trả fail (main loop quyết định reload hay không).
-    """
     try:
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
@@ -184,7 +168,6 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                         return;
                     }
 
-                    // KHÔNG check ws.readyState — chỉ check connection.send
                     if (!window.connection || typeof connection.send !== 'function') {
                         resolve({success: false, error: 'no connection.send', balance: balance});
                         return;
@@ -222,14 +205,9 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
 
 
 # ============================================================
-# >>> CLAIM — KHÔNG check WS <<<
+# CLAIM — KHÔNG check WS
 # ============================================================
 def trigger_and_claim(gf):
-    """
-    Claim KHÔNG check WS. Nếu connection.send timeout → thử lại 1 lần.
-    Không reload ở đây — trả fail về cho main loop xử lý.
-    """
-    # Bước chuẩn bị (giữ nguyên)
     try:
         gf.evaluate("createTable()")
     except Exception:
@@ -278,7 +256,6 @@ def trigger_and_claim(gf):
     if alert_clicked:
         time.sleep(2)
 
-    # Gửi claim, KHÔNG check WS
     max_attempts = 2
     timeout_ms = 15000
     result = None
@@ -287,7 +264,6 @@ def trigger_and_claim(gf):
             result = gf.evaluate(f"""() => {{
                 return new Promise((resolve) => {{
                     try {{
-                        // KHÔNG check ws.readyState — chỉ check connection.send
                         if (!window.connection || typeof connection.send !== 'function') {{
                             resolve({{success: false, error: 'no connection.send'}});
                             return;
@@ -328,7 +304,6 @@ def trigger_and_claim(gf):
         if result.get('success') and result.get('amount', 0) > 0:
             break
 
-        # Chỉ retry nếu timeout/no response — KHÔNG reload
         if attempt < max_attempts - 1:
             err = result.get('error', 'unknown')
             print(f"    attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...",
@@ -338,7 +313,6 @@ def trigger_and_claim(gf):
             except Exception:
                 pass
             time.sleep(2)
-            # Re-click watch video nếu cần
             try:
                 gf.evaluate("""() => {
                     const dialogs = document.querySelectorAll('[class*="msgBox"]');
@@ -370,7 +344,6 @@ def trigger_and_claim(gf):
 # SESSION
 # ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at):
-    """Mở browser → login → claim → transfer → close."""
     print(f"\n########## SESSION {session_id} ##########", flush=True)
 
     browser = p.chromium.launch(
@@ -379,7 +352,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
               "--disable-blink-features=AutomationControlled"],
     )
     context = browser.new_context(
-        viewport={"width": 1920, "height": 1080}, locale="en-US",
+        viewport={"width": 1920, "height": 1080}, locale="vi-VN",
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
                    "Chrome/139.0.0.0 Safari/537.36",
@@ -399,7 +372,6 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 
     page = context.new_page()
 
-    # ===== Login check =====
     print("[1] Login FB...", flush=True)
     try:
         page.goto("https://www.facebook.com/",
@@ -423,7 +395,6 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         pass
     print("  OK", flush=True)
 
-    # ===== Open game =====
     print("[2] Open game...", flush=True)
     try:
         page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
@@ -447,10 +418,9 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
-    # ===== Không đợi WS nữa — chỉ đợi connection object xuất hiện =====
     print("[3] Wait connection object...", flush=True)
     connection_ready = False
-    for _ in range(20):  # 60s
+    for _ in range(20):
         try:
             has_conn = gf.evaluate(
                 "() => !!(window.connection && typeof connection.send === 'function')"
@@ -465,7 +435,6 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     if not connection_ready:
         print("  ⚠ connection.send không xuất hiện — vẫn thử claim", flush=True)
 
-    # ===== Check blocked =====
     if is_account_blocked(gf):
         print(f"  ❌ ACCOUNT BLOCKED — bỏ qua run này.", flush=True)
         try:
@@ -487,7 +456,6 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
 
-    # ===== Pre-claim transfer =====
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
         print(f"\n[Pre-claim] Balance {bal_start_num:,} > "
@@ -507,13 +475,12 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         print(f"  (Balance {bal_start_num:,} ≤ "
               f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)", flush=True)
 
-    # ===== Reward loop =====
     print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
     total = 0
     ok = 0
     fail = 0
     consecutive_timeouts = 0
-    MAX_CONSECUTIVE_TIMEOUTS = 5  # chỉ reload khi timeout liên tiếp >= 5
+    MAX_CONSECUTIVE_TIMEOUTS = 5
 
     for i in range(MAX_CYCLES):
         if time.time() - started_at > MAX_RUNTIME:
@@ -552,9 +519,8 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             err = result.get('error', 'unknown')
             print(f"  {i+1}: FAIL ({err}) | {bal_before}", flush=True)
 
-            if err == 'timeout' or 'timeout' in str(err).lower():
+            if 'timeout' in str(err).lower():
                 consecutive_timeouts += 1
-                # Chỉ reload khi timeout liên tiếp quá nhiều
                 if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
                     print(f"  ⚠ {consecutive_timeouts} timeouts liên tiếp — reload page...",
                           flush=True)
@@ -576,7 +542,6 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
           f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
 
-    # ===== Transfer cuối session — KHÔNG reload nếu WS chết =====
     if TRANSFER_ENABLED and total > 0:
         print(f"\n[SESSION {session_id}] === TRANSFER ALL → "
               f"{TRANSFER_DEST_ID} ===", flush=True)
@@ -603,10 +568,10 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 
 
 # ============================================================
-# MAIN — VÒNG LẶP VÔ HẠN
+# MAIN
 # ============================================================
 def main():
-    print(f"Config: COOKIE=HARDCODED (c_user=61594746041618) "
+    print(f"Config: COOKIE=HARDCODED (c_user=61562610920837) "
           f"MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s "
           f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS} "
           f"SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s "
@@ -629,7 +594,7 @@ def main():
         while True:
             session_id += 1
             print(f"\n{'='*60}", flush=True)
-            print(f">>> RUN #{session_id}  |  cookie: HARDCODED  "
+            print(f">>> RUN #{session_id}  |  cookie: c_user=61562610920837  "
                   f"|  {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
             print(f"{'='*60}", flush=True)
 
