@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v13 — COOKIE MỚI (c_user=61562610920837).
-BỎ check WS, KHÔNG reload khi claim/transfer.
-Chỉ reload khi connection.send timeout liên tiếp >= 5 lần.
+"""FB Sam loc reward bot v13b — URL fb.gg + cookie mới (c_user=61562610920837).
+BỎ check WS. Chỉ reload khi timeout liên tiếp >= 5.
 """
 import os, sys, time
 
@@ -14,29 +13,35 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # ============================================================
-# >>> COOKIE HARDCODE — ACCOUNT MỚI <<<
+# >>> COOKIE MỚI <<<
 # ============================================================
 COOKIE_RAW = (
-    "datr=XSa_ap7Py64wLii28cJwANkb; sb=XSa_ahbAv9XMUHfep4z2jQUb; "
-    "m_pixel_ratio=2; vpd=v1%3B616x360x2; ps_l=1; ps_n=1; "
-    "c_user=61562610920837; "
-    "xs=2%3A_7XAkFKNO3TC7w%3A2%3A1791022733%3A-1%3A-1; "
-    "fr=0ZX5mgCABu4MTVFSz.AWexRjwNcz9skN0lbNRhtpio158pYERs-VufrfGcRX1eA3O3s5o"
-    ".BqvyZd..AAA.0.0.BqwNaX.AWdo5s9xFZVUcFs9LBiolEJj_9g; "
-    "locale=vi_VN; "
+    "sb=XSa_ahbAv9XMUHfep4z2jQUb; m_pixel_ratio=2; vpd=v1%3B616x360x2; "
+    "ps_l=1; ps_n=1; locale=vi_VN; "
     "pas=61595197311852%3APOwi1i3tVJ%2C61594782729357%3AVvbK8iGoqB%2C"
     "61594960651753%3Aci75sCyaff%2C61594746041618%3AiAAzWgyfvh%2C"
     "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV%2C"
     "61562610920837%3A83znIlEigO; "
-    "fbl_st=101727469%3BT%3A29850379; "
     "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791022744; "
+    "datr=wdjAau4MNR7IM08V5XLbosEH; "
+    "c_user=61562610920837; "
+    "xs=28%3ANrZsCxInw1jA6Q%3A2%3A1791023450%3A-1%3A-1; "
+    "fr=0ZX5mgCABu4MTVFSz.AWcuhEX2bUUNxjweBtzGxg3dt_xwbsb-gRxPf8bHOn62MNo6GuE"
+    ".BqvyZd..GrA.0.0.BqwNlt.AWegPj-OCsq4jU5OyUwbGaoJ9oo; "
     "wd=360x616"
 )
 
 # ============================================================
+# >>> URL GAME MỚI <<<
+# ============================================================
+GAME_URL = "https://fb.gg/play/sam_loc_vh"
+
+# URL phụ để fallback nếu fb.gg không load
+GAME_URL_FALLBACK = "https://www.facebook.com/gaming/play/sam_loc_vh"
+
+# ============================================================
 # CONFIG
 # ============================================================
-GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "40"))
 DELAY = float(os.environ.get("COOLDOWN", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))
@@ -101,12 +106,31 @@ def get_bal(gf):
 
 
 def find_gf(page, max_wait=120):
+    """Tìm iframe game — hỗ trợ cả instant-bundle (fbsbx) và fb.gg."""
     for _ in range(max_wait // 5):
         for f in page.frames:
-            if "instant-bundle" in f.url and "fbsbx.com" in f.url:
+            url = f.url
+            if "instant-bundle" in url and "fbsbx.com" in url:
+                return f
+            # Một số game fb.gg dùng URL khác
+            if "fb.gg" in url and "sam_loc" in url and f != page.main_frame:
+                return f
+            if "gaming" in url and "sam_loc" in url and f != page.main_frame:
                 return f
         time.sleep(5)
     return None
+
+
+def debug_frames(page, tag=""):
+    """Log tất cả frame URL — dùng khi không tìm thấy game frame."""
+    print(f"  [DEBUG{(' '+tag) if tag else ''}] Frames hiện có:", flush=True)
+    for i, f in enumerate(page.frames):
+        print(f"    [{i}] {f.url[:150]}", flush=True)
+    try:
+        page.screenshot(path="debug_fail.png", full_page=False)
+        print("  [DEBUG] Screenshot: debug_fail.png", flush=True)
+    except Exception:
+        pass
 
 
 def is_account_blocked(gf):
@@ -127,8 +151,41 @@ def is_account_blocked(gf):
         return False
 
 
+def dismiss_popups(page):
+    """Đóng các dialog FB (đồng ý điều khoản, xác nhận, cookie banner...)."""
+    clicked = 0
+    for _ in range(3):
+        try:
+            found = page.evaluate("""() => {
+                const keywords = ['đồng ý', 'chấp nhận', 'ok', 'continue', 'accept',
+                                  'allow', 'cho phép', 'đóng', 'close', 'got it',
+                                  'bắt đầu', 'start', 'chơi ngay', 'play now'];
+                const btns = document.querySelectorAll('button, [role="button"], a[role="button"]');
+                let count = 0;
+                for (const b of btns) {
+                    if (b.offsetParent === null) continue;
+                    const t = (b.textContent || '').toLowerCase().trim();
+                    for (const kw of keywords) {
+                        if (t === kw || t.includes(kw)) {
+                            try { b.click(); count++; } catch(e) {}
+                            break;
+                        }
+                    }
+                }
+                return count;
+            }""")
+            if found:
+                clicked += found
+                page.wait_for_timeout(1500)
+            else:
+                break
+        except Exception:
+            break
+    if clicked:
+        print(f"  Đã đóng {clicked} popup/button", flush=True)
+
+
 def reload_game_page(page):
-    """Reload page khi send timeout liên tiếp."""
     print("  ⟳ Reload page (send timed out)...", flush=True)
     try:
         page.reload(wait_until="domcontentloaded", timeout=60000)
@@ -146,7 +203,7 @@ def reload_game_page(page):
 
 
 # ============================================================
-# TRANSFER — KHÔNG check WS
+# TRANSFER
 # ============================================================
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
     try:
@@ -205,7 +262,7 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
 
 
 # ============================================================
-# CLAIM — KHÔNG check WS
+# CLAIM
 # ============================================================
 def trigger_and_claim(gf):
     try:
@@ -372,6 +429,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 
     page = context.new_page()
 
+    # ===== Login check =====
     print("[1] Login FB...", flush=True)
     try:
         page.goto("https://www.facebook.com/",
@@ -393,31 +451,53 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             return 0, 0, 0, False
     except Exception:
         pass
+
+    # Checkpoint check
+    cur_url = page.url
+    if "checkpoint" in cur_url or "/login" in cur_url:
+        print(f"  ❌ FB CHECKPOINT: {cur_url}", flush=True)
+        try:
+            browser.close()
+        except Exception:
+            pass
+        return 0, 0, 0, False
+
     print("  OK", flush=True)
 
-    print("[2] Open game...", flush=True)
-    try:
-        page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
-    except Exception as e:
-        print(f"  ERROR goto game: {e}", flush=True)
+    # ===== Open game (fb.gg) =====
+    print(f"[2] Open game: {GAME_URL}", flush=True)
+    gf = None
+    for attempt_url in [GAME_URL, GAME_URL_FALLBACK]:
+        try:
+            page.goto(attempt_url, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            print(f"  ERROR goto {attempt_url}: {e}", flush=True)
+            continue
+
+        page.wait_for_timeout(20000)
+        dismiss_popups(page)     # đóng đồng ý điều khoản / cookie banner
+        page.wait_for_timeout(2000)
+
+        gf = find_gf(page, max_wait=60)
+        if gf:
+            print(f"  Game loaded từ {attempt_url}", flush=True)
+            break
+        else:
+            print(f"  Không tìm thấy frame từ {attempt_url}, thử URL kia...",
+                  flush=True)
+
+    if not gf:
+        print("  ❌ ERROR: Game frame not found (đã thử cả 2 URL)", flush=True)
+        debug_frames(page, "fail")
         try:
             browser.close()
         except Exception:
             pass
         return 0, 0, 0, True
 
-    page.wait_for_timeout(20000)
-    gf = find_gf(page, max_wait=60)
-    if not gf:
-        print("  ERROR: Game frame not found", flush=True)
-        try:
-            browser.close()
-        except Exception:
-            pass
-        return 0, 0, 0, True
-    print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
+    # ===== Wait connection =====
     print("[3] Wait connection object...", flush=True)
     connection_ready = False
     for _ in range(20):
@@ -435,6 +515,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     if not connection_ready:
         print("  ⚠ connection.send không xuất hiện — vẫn thử claim", flush=True)
 
+    # ===== Blocked check =====
     if is_account_blocked(gf):
         print(f"  ❌ ACCOUNT BLOCKED — bỏ qua run này.", flush=True)
         try:
@@ -456,6 +537,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
 
+    # ===== Pre-claim transfer =====
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
         print(f"\n[Pre-claim] Balance {bal_start_num:,} > "
@@ -475,6 +557,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         print(f"  (Balance {bal_start_num:,} ≤ "
               f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)", flush=True)
 
+    # ===== Reward loop =====
     print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
     total = 0
     ok = 0
@@ -542,6 +625,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
           f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
 
+    # ===== Transfer cuối session =====
     if TRANSFER_ENABLED and total > 0:
         print(f"\n[SESSION {session_id}] === TRANSFER ALL → "
               f"{TRANSFER_DEST_ID} ===", flush=True)
@@ -571,20 +655,20 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 # MAIN
 # ============================================================
 def main():
-    print(f"Config: COOKIE=HARDCODED (c_user=61562610920837) "
+    print(f"Config: COOKIE c_user=61562610920837 | GAME_URL={GAME_URL} "
           f"MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s "
           f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS} "
           f"SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s "
           f"TRANSFER_ENABLED={TRANSFER_ENABLED} DEST={TRANSFER_DEST_ID}",
           flush=True)
-    print(f"Mode: NO WS CHECK — chỉ reload khi timeout liên tiếp >= 5",
+    print(f"Mode: NO WS CHECK — reload only after 5 consecutive timeouts",
           flush=True)
 
     fb_cookies = parse_cookie(COOKIE_RAW)
     if not fb_cookies:
-        print("[STOP] Parse cookie hardcode thất bại.", flush=True)
+        print("[STOP] Parse cookie thất bại.", flush=True)
         return 1
-    print(f"[COOKIE] Đã parse {len(fb_cookies)} cookie từ hardcode.", flush=True)
+    print(f"[COOKIE] Parse {len(fb_cookies)} cookie OK.", flush=True)
 
     grand_total = 0
     grand_ok = 0
@@ -594,7 +678,7 @@ def main():
         while True:
             session_id += 1
             print(f"\n{'='*60}", flush=True)
-            print(f">>> RUN #{session_id}  |  cookie: c_user=61562610920837  "
+            print(f">>> RUN #{session_id}  |  c_user=61562610920837  "
                   f"|  {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
             print(f"{'='*60}", flush=True)
 
@@ -614,8 +698,7 @@ def main():
                   f"{grand_total} coin", flush=True)
 
             if not cookies_ok:
-                print("[WARN] Cookie hết hạn hoặc account blocked — cần "
-                      "cập nhật COOKIE_RAW trong code.", flush=True)
+                print("[WARN] Cookie hết hạn hoặc account blocked.", flush=True)
 
             print(f"[REST] Nghỉ {SLEEP_BETWEEN_RUNS}s rồi chạy lại...",
                   flush=True)
