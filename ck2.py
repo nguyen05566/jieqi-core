@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v12 — COOKIE HARDCODE, không đọc file ngoài.
-Vòng lặp vô hạn: mở browser → login → MAX_CYCLES claim → transfer → close → nghỉ → lặp.
+"""FB Sam loc reward bot v13 — BỎ check WS, KHÔNG reload khi claim/transfer.
+Cookie hardcode. Vòng lặp vô hạn. Chỉ reload khi connection.send thật sự timeout.
+
+Triết lý: không tin `connection.ws.readyState` — tin `connection.send()`.
+Nếu send trả về response → OK. Nếu timeout → mới xử lý.
 """
 import os, sys, time
 
@@ -54,7 +57,6 @@ PRE_CLAIM_TRANSFER_THRESHOLD = int(
 # PARSE COOKIE
 # ============================================================
 def parse_cookie(raw: str):
-    """Parse chuỗi cookie header thành list dict cho Playwright."""
     raw = raw.strip().strip('"').strip("'")
     raw = " ".join(raw.split())
     raw = raw.replace(";  ", "; ").replace(" ;", ";")
@@ -79,7 +81,6 @@ def parse_cookie(raw: str):
 # HELPER
 # ============================================================
 def parse_balance_num(bal_text):
-    """Parse '56.4k' or '123,456' or '78900' → int."""
     if not bal_text or bal_text == '?':
         return 0
     s = str(bal_text).strip().lower().replace(',', '').replace(' ', '')
@@ -131,57 +132,39 @@ def is_account_blocked(gf):
         return False
 
 
-def ensure_ws_connected(gf, page, max_retries=2):
-    """Check WS state, reload page if disconnected. True nếu WS OK."""
+# ============================================================
+# >>> RELOAD PAGE (chỉ dùng khi send timeout thật sự) <<<
+# ============================================================
+def reload_game_page(page):
+    """
+    Reload page + đợi game load lại. Trả về gf mới hoặc None.
+    CHỈ gọi khi connection.send timeout — không gọi định kỳ.
+    """
+    print("  ⟳ Reload page (send timed out)...", flush=True)
     try:
-        ws_ok = gf.evaluate(
-            "() => !!(window.connection && connection.ws && connection.ws.readyState === 1)"
-        )
-        if ws_ok:
-            return True
-    except Exception:
-        pass
-
-    print(f"  ⚠ WS not connected — reloading page...", flush=True)
-
-    for retry in range(max_retries):
-        try:
-            page.reload(wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(20000)
-
-            new_gf = find_gf(page, max_wait=60)
-            if not new_gf:
-                print(f"  ⚠ Reload #{retry+1}: game frame not found", flush=True)
-                continue
-
-            for _ in range(15):
-                try:
-                    ws_ok = new_gf.evaluate(
-                        "() => !!(window.connection && connection.ws && connection.ws.readyState === 1)"
-                    )
-                    if ws_ok:
-                        print(f"  ✓ WS reconnected after reload #{retry+1}",
-                              flush=True)
-                        return True
-                except Exception:
-                    pass
-                page.wait_for_timeout(3000)
-        except Exception as e:
-            print(f"  ⚠ Reload #{retry+1} error: {e}", flush=True)
-
-    print(f"  ❌ WS reconnect failed after {max_retries} reloads", flush=True)
-    return False
+        page.reload(wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(20000)
+        new_gf = find_gf(page, max_wait=60)
+        if new_gf:
+            print("  ✓ Game reloaded", flush=True)
+            page.wait_for_timeout(10000)  # đợi balance sync
+            return new_gf
+        print("  ✗ Game frame not found after reload", flush=True)
+        return None
+    except Exception as e:
+        print(f"  ✗ Reload error: {e}", flush=True)
+        return None
 
 
+# ============================================================
+# >>> TRANSFER — KHÔNG check WS <<<
+# ============================================================
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
-    """Transfer ALL current xu về dest_id via game's connection.send."""
-    if not ensure_ws_connected(gf, page):
-        return {"success": False, "error": "ws reconnect failed after reloads"}
-
-    gf_new = find_gf(page, max_wait=30)
-    if gf_new:
-        gf = gf_new
-
+    """
+    Transfer ALL current xu về dest_id.
+    KHÔNG check ws.readyState — chỉ check connection.send có tồn tại.
+    Nếu send timeout → trả fail (main loop quyết định reload hay không).
+    """
     try:
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
@@ -201,8 +184,9 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                         return;
                     }
 
-                    if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
-                        resolve({success: false, error: 'ws not connected', balance: balance});
+                    // KHÔNG check ws.readyState — chỉ check connection.send
+                    if (!window.connection || typeof connection.send !== 'function') {
+                        resolve({success: false, error: 'no connection.send', balance: balance});
                         return;
                     }
 
@@ -237,14 +221,15 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
         return {"success": False, "error": f"evaluate error: {e}"}
 
 
-def trigger_and_claim(gf, page):
-    """Claim với retry 1 lần + WS reconnect trước mỗi claim."""
-    if not ensure_ws_connected(gf, page, max_retries=1):
-        return {"success": False, "error": "ws reconnect failed"}
-    gf_new = find_gf(page, max_wait=30)
-    if gf_new:
-        gf = gf_new
-
+# ============================================================
+# >>> CLAIM — KHÔNG check WS <<<
+# ============================================================
+def trigger_and_claim(gf):
+    """
+    Claim KHÔNG check WS. Nếu connection.send timeout → thử lại 1 lần.
+    Không reload ở đây — trả fail về cho main loop xử lý.
+    """
+    # Bước chuẩn bị (giữ nguyên)
     try:
         gf.evaluate("createTable()")
     except Exception:
@@ -293,6 +278,7 @@ def trigger_and_claim(gf, page):
     if alert_clicked:
         time.sleep(2)
 
+    # Gửi claim, KHÔNG check WS
     max_attempts = 2
     timeout_ms = 15000
     result = None
@@ -301,8 +287,9 @@ def trigger_and_claim(gf, page):
             result = gf.evaluate(f"""() => {{
                 return new Promise((resolve) => {{
                     try {{
-                        if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {{
-                            resolve({{success: false, error: 'ws not connected'}});
+                        // KHÔNG check ws.readyState — chỉ check connection.send
+                        if (!window.connection || typeof connection.send !== 'function') {{
+                            resolve({{success: false, error: 'no connection.send'}});
                             return;
                         }}
                         const msg = new OutboundMessage("VIDEO_REWARD");
@@ -324,7 +311,7 @@ def trigger_and_claim(gf, page):
                                     resolve({{success: true, amount: 0, error: e.toString()}});
                                 }}
                             }} else {{
-                                resolve({{success: false, error: 'no response'}});
+                                resolve({{success: false, error: 'send returned false'}});
                             }}
                         }});
                         setTimeout(() => {{
@@ -341,21 +328,17 @@ def trigger_and_claim(gf, page):
         if result.get('success') and result.get('amount', 0) > 0:
             break
 
+        # Chỉ retry nếu timeout/no response — KHÔNG reload
         if attempt < max_attempts - 1:
             err = result.get('error', 'unknown')
-            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...",
+            print(f"    attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...",
                   flush=True)
             try:
                 gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
             except Exception:
                 pass
             time.sleep(2)
-            if not ensure_ws_connected(gf, page, max_retries=1):
-                print(f"  WS still dead, skip retry", flush=True)
-                break
-            gf_new = find_gf(page, max_wait=30)
-            if gf_new:
-                gf = gf_new
+            # Re-click watch video nếu cần
             try:
                 gf.evaluate("""() => {
                     const dialogs = document.querySelectorAll('[class*="msgBox"]');
@@ -376,15 +359,11 @@ def trigger_and_claim(gf, page):
             except Exception:
                 pass
             time.sleep(1)
-        else:
-            err = result.get('error', 'unknown')
-            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}) — giving up",
-                  flush=True)
 
-    if not result.get('success') or result.get('amount', 0) == 0:
+    if result and (not result.get('success') or result.get('amount', 0) == 0):
         result['method'] = 'alert_clicked' if alert_clicked else 'no_alert'
 
-    return result
+    return result or {"success": False, "error": "no result"}
 
 
 # ============================================================
@@ -468,18 +447,23 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print("  Game loaded", flush=True)
     page.wait_for_timeout(10000)
 
-    # ===== Wait WS =====
-    print("[3] Wait WS...", flush=True)
-    for _ in range(10):
+    # ===== Không đợi WS nữa — chỉ đợi connection object xuất hiện =====
+    print("[3] Wait connection object...", flush=True)
+    connection_ready = False
+    for _ in range(20):  # 60s
         try:
-            if gf.evaluate(
-                "() => window.connection && connection.ws && connection.ws.readyState === 1"
-            ):
-                print("  WS connected", flush=True)
+            has_conn = gf.evaluate(
+                "() => !!(window.connection && typeof connection.send === 'function')"
+            )
+            if has_conn:
+                print("  connection.send available", flush=True)
+                connection_ready = True
                 break
         except Exception:
             pass
         time.sleep(3)
+    if not connection_ready:
+        print("  ⚠ connection.send không xuất hiện — vẫn thử claim", flush=True)
 
     # ===== Check blocked =====
     if is_account_blocked(gf):
@@ -508,20 +492,17 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
         print(f"\n[Pre-claim] Balance {bal_start_num:,} > "
               f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, transfer trước...", flush=True)
-        try:
-            pre = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
-            if pre.get('success'):
-                amt = pre.get('balance', 0)
-                print(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}",
-                      flush=True)
-                time.sleep(2)
-                bal_start = get_bal(gf)
-                print(f"     Balance sau pre-transfer: {bal_start}", flush=True)
-            else:
-                print(f"  ❌ Pre-claim transfer fail: "
-                      f"{pre.get('error', 'unknown')}", flush=True)
-        except Exception as e:
-            print(f"  ❌ Pre-claim transfer exception: {e}", flush=True)
+        pre = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
+        if pre.get('success'):
+            amt = pre.get('balance', 0)
+            print(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}",
+                  flush=True)
+            time.sleep(2)
+            bal_start = get_bal(gf)
+            print(f"     Balance sau pre-transfer: {bal_start}", flush=True)
+        else:
+            print(f"  ❌ Pre-claim transfer fail: {pre.get('error', 'unknown')}",
+                  flush=True)
     elif bal_start_num > 0:
         print(f"  (Balance {bal_start_num:,} ≤ "
               f"{PRE_CLAIM_TRANSFER_THRESHOLD:,}, skip pre-claim)", flush=True)
@@ -531,6 +512,8 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     total = 0
     ok = 0
     fail = 0
+    consecutive_timeouts = 0
+    MAX_CONSECUTIVE_TIMEOUTS = 5  # chỉ reload khi timeout liên tiếp >= 5
 
     for i in range(MAX_CYCLES):
         if time.time() - started_at > MAX_RUNTIME:
@@ -545,7 +528,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         time.sleep(1)
 
         try:
-            result = trigger_and_claim(gf, page)
+            result = trigger_and_claim(gf)
         except Exception as e:
             print(f"  {i+1}: EXCEPTION ({e})", flush=True)
             fail += 1
@@ -558,6 +541,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             amount = result['amount']
             total += amount
             ok += 1
+            consecutive_timeouts = 0
             time.sleep(1)
             bal_after = get_bal(gf)
             print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}",
@@ -567,6 +551,19 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             fail += 1
             err = result.get('error', 'unknown')
             print(f"  {i+1}: FAIL ({err}) | {bal_before}", flush=True)
+
+            if err == 'timeout' or 'timeout' in str(err).lower():
+                consecutive_timeouts += 1
+                # Chỉ reload khi timeout liên tiếp quá nhiều
+                if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                    print(f"  ⚠ {consecutive_timeouts} timeouts liên tiếp — reload page...",
+                          flush=True)
+                    new_gf = reload_game_page(page)
+                    if new_gf:
+                        gf = new_gf
+                    consecutive_timeouts = 0
+            else:
+                consecutive_timeouts = 0
 
         if fail >= 8:
             print("  Too many fails, stopping session", flush=True)
@@ -579,23 +576,22 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
           f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
 
-    # ===== Transfer cuối session =====
-    if TRANSFER_ENABLED:
+    # ===== Transfer cuối session — KHÔNG reload nếu WS chết =====
+    if TRANSFER_ENABLED and total > 0:
         print(f"\n[SESSION {session_id}] === TRANSFER ALL → "
               f"{TRANSFER_DEST_ID} ===", flush=True)
-        try:
+        time.sleep(2)
+        tr = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
+        if tr.get('success'):
+            amt = tr.get('balance', 0)
+            print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
             time.sleep(2)
-            tr = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
-            if tr.get('success'):
-                amt = tr.get('balance', 0)
-                print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
-                time.sleep(2)
-                print(f"     Balance sau transfer: {get_bal(gf)}", flush=True)
-            else:
-                print(f"  ❌ Transfer fail: {tr.get('error', 'unknown')} "
-                      f"(balance was {tr.get('balance', 0)})", flush=True)
-        except Exception as e:
-            print(f"  ❌ Transfer exception: {e}", flush=True)
+            print(f"     Balance sau transfer: {get_bal(gf)}", flush=True)
+        else:
+            err = tr.get('error', 'unknown')
+            bal_at = tr.get('balance', 0)
+            print(f"  ⚠ Transfer fail: {err} (balance was {bal_at})", flush=True)
+            print(f"     → Sẽ transfer ở session sau (pre-claim)", flush=True)
 
     print(f"[SESSION {session_id}] Đóng browser (giữ cookie)...", flush=True)
     try:
@@ -616,6 +612,8 @@ def main():
           f"SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s "
           f"TRANSFER_ENABLED={TRANSFER_ENABLED} DEST={TRANSFER_DEST_ID}",
           flush=True)
+    print(f"Mode: NO WS CHECK — chỉ reload khi timeout liên tiếp >= 5",
+          flush=True)
 
     fb_cookies = parse_cookie(COOKIE_RAW)
     if not fb_cookies:
@@ -628,7 +626,7 @@ def main():
     session_id = 0
 
     with sync_playwright() as p:
-        while True:  # VÒNG LẶP VÔ HẠN
+        while True:
             session_id += 1
             print(f"\n{'='*60}", flush=True)
             print(f">>> RUN #{session_id}  |  cookie: HARDCODED  "
