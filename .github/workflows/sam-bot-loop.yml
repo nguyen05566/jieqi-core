@@ -33,7 +33,7 @@ jobs:
           TRANSFER_DEST_ID: '51977054'
           TRANSFER_ENABLED: 'true'
         run: |
-          python3 sam_reward_bot_v3_transfer.py
+          python3 ck1.py
 
       - name: Show log
         if: always()
