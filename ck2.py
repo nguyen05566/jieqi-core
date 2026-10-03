@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v11 — GỘP tất cả: bot + transfer + run_forever.
-CHỈ ĐỌC 1 FILE COOKIE CỐ ĐỊNH (mặc định ck1.txt, đổi qua env COOKIE_FILE).
-Vòng lặp vô hạn tích hợp trong Python — không cần file .sh.
-
-Mỗi run: mở browser → login → MAX_CYCLES claim → transfer hết xu → close → nghỉ → lặp.
+"""FB Sam loc reward bot v12 — COOKIE HARDCODE, không đọc file ngoài.
+Vòng lặp vô hạn: mở browser → login → MAX_CYCLES claim → transfer → close → nghỉ → lặp.
 """
 import os, sys, time
 
@@ -17,21 +14,32 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # ============================================================
-# CONFIG (đọc từ biến môi trường)
+# >>> COOKIE HARDCODE <<<
+# ============================================================
+COOKIE_RAW = (
+    "datr=XSa_ap7Py64wLii28cJwANkb; sb=XSa_ahbAv9XMUHfep4z2jQUb; "
+    "m_pixel_ratio=2; vpd=v1%3B616x360x2; ps_l=1; ps_n=1; "
+    "locale=en_GB; "
+    "pas=61595197311852%3APOwi1i3tVJ%2C61594782729357%3AVvbK8iGoqB%2C"
+    "61594960651753%3Aci75sCyaff%2C61594746041618%3AiAAzWgyfvh%2C"
+    "100051928670915%3Aw80kSunsKe%2C61561542347462%3AMdbf81FzjV; "
+    "c_user=61594746041618; "
+    "xs=37%3AlVahnIXBe-j0vQ%3A2%3A1791016624%3A-1%3A-1; "
+    "fr=0ZX5mgCABu4MTVFSz.AWchBQGyZBrRSuTw0H5Bc66XaJrwvXxllyZDe7whN96N3sVf-ws"
+    ".BqvyZd..AAA.0.0.BqwL6z.AWdXxIGIQnrl2HJCiDOXGH1pRDI; "
+    "fbl_st=101723048%3BT%3A29850277; "
+    "wl_cbv=v2%3Bclient_version%3A3310%3Btimestamp%3A1791016627; "
+    "wd=360x616"
+)
+
+# ============================================================
+# CONFIG
 # ============================================================
 GAME_URL = "https://www.facebook.com/gaming/play/sam_loc_vh"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "40"))
 DELAY = float(os.environ.get("COOLDOWN", "3"))
-REST = int(os.environ.get("REST_BETWEEN_RUNS", "5"))
-MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))  # mỗi run (giây)
+MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
-
-# >>> CHỈ ĐỌC 1 FILE COOKIE CỐ ĐỊNH <<<
-COOKIE_FILE = os.environ.get("COOKIE_FILE", "ck2.txt")
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIE_PATH = os.path.join(SCRIPT_DIR, COOKIE_FILE)
-
-# Nghỉ giữa các run vô hạn
 SLEEP_BETWEEN_RUNS = int(os.environ.get("SLEEP_BETWEEN_RUNS", "10"))
 
 # Transfer
@@ -43,30 +51,8 @@ PRE_CLAIM_TRANSFER_THRESHOLD = int(
 
 
 # ============================================================
-# ĐỌC COOKIE TỪ 1 FILE CỐ ĐỊNH
+# PARSE COOKIE
 # ============================================================
-def load_cookie_set(path=COOKIE_PATH):
-    """Đọc duy nhất 1 file cookie. Trả về chuỗi raw hoặc None."""
-    if not os.path.exists(path):
-        print(f"[COOKIE] Không tìm thấy file: {path}", flush=True)
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            content = fh.read().strip()
-        if not content:
-            print(f"[COOKIE] {path} rỗng.", flush=True)
-            return None
-        content = content.strip('"').strip("'")
-        content = " ".join(content.split())
-        content = content.replace(";  ", "; ").replace(" ;", ";")
-        print(f"[COOKIE] Nạp {os.path.basename(path)} "
-              f"({len(content)} ký tự)", flush=True)
-        return content
-    except Exception as e:
-        print(f"[COOKIE] Lỗi đọc {path}: {e}", flush=True)
-        return None
-
-
 def parse_cookie(raw: str):
     """Parse chuỗi cookie header thành list dict cho Playwright."""
     raw = raw.strip().strip('"').strip("'")
@@ -168,7 +154,7 @@ def ensure_ws_connected(gf, page, max_retries=2):
                 print(f"  ⚠ Reload #{retry+1}: game frame not found", flush=True)
                 continue
 
-            for _ in range(15):  # ~45s
+            for _ in range(15):
                 try:
                     ws_ok = new_gf.evaluate(
                         "() => !!(window.connection && connection.ws && connection.ws.readyState === 1)"
@@ -405,8 +391,7 @@ def trigger_and_claim(gf, page):
 # SESSION
 # ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at):
-    """Mở browser → login → claim → transfer → close.
-    Trả về (total, ok, fail, cookies_ok)."""
+    """Mở browser → login → claim → transfer → close."""
     print(f"\n########## SESSION {session_id} ##########", flush=True)
 
     browser = p.chromium.launch(
@@ -625,16 +610,18 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 # MAIN — VÒNG LẶP VÔ HẠN
 # ============================================================
 def main():
-    print(f"Config: COOKIE_FILE={COOKIE_FILE} MAX_CLAIMS={MAX_CYCLES} "
-          f"COOLDOWN={DELAY}s MAX_RUNTIME={MAX_RUNTIME}s "
-          f"HEADLESS={HEADLESS} SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s "
+    print(f"Config: COOKIE=HARDCODED (c_user=61594746041618) "
+          f"MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s "
+          f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS} "
+          f"SLEEP_BETWEEN_RUNS={SLEEP_BETWEEN_RUNS}s "
           f"TRANSFER_ENABLED={TRANSFER_ENABLED} DEST={TRANSFER_DEST_ID}",
           flush=True)
-    print(f"Cookie path: {COOKIE_PATH}", flush=True)
 
-    if not os.path.exists(COOKIE_PATH):
-        print(f"[STOP] Không tìm thấy file cookie: {COOKIE_PATH}", flush=True)
+    fb_cookies = parse_cookie(COOKIE_RAW)
+    if not fb_cookies:
+        print("[STOP] Parse cookie hardcode thất bại.", flush=True)
         return 1
+    print(f"[COOKIE] Đã parse {len(fb_cookies)} cookie từ hardcode.", flush=True)
 
     grand_total = 0
     grand_ok = 0
@@ -642,22 +629,9 @@ def main():
 
     with sync_playwright() as p:
         while True:  # VÒNG LẶP VÔ HẠN
-            raw = load_cookie_set(COOKIE_PATH)
-            if not raw:
-                print(f"[WARN] Cookie rỗng/không đọc được, nghỉ "
-                      f"{SLEEP_BETWEEN_RUNS}s rồi thử lại...", flush=True)
-                time.sleep(SLEEP_BETWEEN_RUNS)
-                continue
-
-            fb_cookies = parse_cookie(raw)
-            if not fb_cookies:
-                print("[WARN] Parse cookie rỗng, nghỉ rồi thử lại...", flush=True)
-                time.sleep(SLEEP_BETWEEN_RUNS)
-                continue
-
             session_id += 1
             print(f"\n{'='*60}", flush=True)
-            print(f">>> RUN #{session_id}  |  cookie: {COOKIE_FILE}  "
+            print(f">>> RUN #{session_id}  |  cookie: HARDCODED  "
                   f"|  {time.strftime('%Y-%m-%d %H:%M:%S')}", flush=True)
             print(f"{'='*60}", flush=True)
 
@@ -678,7 +652,7 @@ def main():
 
             if not cookies_ok:
                 print("[WARN] Cookie hết hạn hoặc account blocked — cần "
-                      f"cập nhật {COOKIE_FILE}.", flush=True)
+                      "cập nhật COOKIE_RAW trong code.", flush=True)
 
             print(f"[REST] Nghỉ {SLEEP_BETWEEN_RUNS}s rồi chạy lại...",
                   flush=True)
