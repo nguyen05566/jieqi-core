@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v9 — đọc cookie từ ck1.txt, ck2.txt, ck3.txt...
-Chạy vòng tròn: ck1 → ck2 → ckN → ck1 → ...
-Mỗi session: mở browser → login → MAX_CYCLES → close → nghỉ REST → cookie kế.
+"""FB Sam loc reward bot v9 — SINGLE COOKIE MODE
+★ CHỈ chạy duy nhất ck2.txt — KHÔNG quét ck1, ck3, ck4...
+Chạy vòng lặp session liên tục trên cùng 1 tài khoản.
+Mỗi session: mở browser → login → MAX_CYCLES → transfer → close → nghỉ REST → lặp lại.
 """
-import os, sys, time, glob, re
+import os, sys, time, re
 
 # Thử import module bổ trợ nếu có (không bắt buộc)
 try:
@@ -21,17 +22,18 @@ REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
-# ============ ADDED: TRANSFER LOGIC ============
+# ============ TRANSFER LOGIC ============
 # Transfer xu về hub account 51977054 sau mỗi session
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
-# ============ ADDED: SINGLE_COOKIE_FILE for parallel runs ============
-# Nếu set, bot chỉ dùng 1 cookie file này (skip cycle) — để chạy song song N processes
-SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "")
+# ============ SINGLE COOKIE MODE ============
+# ★ CHỈ chạy duy nhất file này — KHÔNG quét ck*.txt
+# Có thể override bằng env SINGLE_COOKIE_FILE nếu muốn đổi file khác.
+SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck3.txt").strip()
 
-# ============ ADDED: Pre-claim transfer threshold ============
-# Nếu balance > ngưỡng này (xu), transfer trước khi claim tiếp (user request)
+# ============ Pre-claim transfer threshold ============
+# Nếu balance > ngưỡng này (xu), transfer trước khi claim tiếp
 PRE_CLAIM_TRANSFER_THRESHOLD = int(os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000"))
 
 
@@ -51,41 +53,34 @@ def parse_balance_num(bal_text):
 
 
 # ============================================================
-# ĐỌC COOKIE TỪ FILE ck*.txt
+# ĐỌC COOKIE TỪ FILE DUY NHẤT
 # ============================================================
-def load_all_cookie_sets(folder="."):
+def load_single_cookie_set(path):
     """
-    Quét mọi file ck*.txt, sắp xếp theo số tăng dần (ck1 < ck2 < ck10).
-    Trả về: [{"file": "ck1.txt", "raw": "datr=...; sb=...; ..."}, ...]
+    Đọc đúng 1 file cookie. Trả về [{"file": "...", "raw": "..."}] hoặc [].
     """
-    pattern = os.path.join(folder, "ck*.txt")
-    files = glob.glob(pattern)
+    if not os.path.exists(path):
+        print(f"[COOKIE] ❌ Không tìm thấy file: {path}", flush=True)
+        return []
 
-    def sort_key(path):
-        m = re.search(r'ck(\d+)\.txt$', os.path.basename(path))
-        return int(m.group(1)) if m else 999999
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            content = fh.read().strip()
+    except Exception as e:
+        print(f"[COOKIE] ❌ Lỗi đọc {path}: {e}", flush=True)
+        return []
 
-    files.sort(key=sort_key)
+    if not content:
+        print(f"[COOKIE] ❌ {path} rỗng", flush=True)
+        return []
 
-    cookie_sets = []
-    for path in files:
-        try:
-            with open(path, "r", encoding="utf-8") as fh:
-                content = fh.read().strip()
-            if not content:
-                print(f"[COOKIE] {path} rỗng, bỏ qua", flush=True)
-                continue
-            # Chuẩn hoá: bỏ nháy, gộp xuống dòng/tab, chuẩn hoá dấu ;
-            content = content.strip('"').strip("'")
-            content = " ".join(content.split())
-            content = content.replace(";  ", "; ").replace(" ;", ";")
-            cookie_sets.append({"file": os.path.basename(path), "raw": content})
-            print(f"[COOKIE] Nạp {os.path.basename(path)} "
-                  f"({len(content)} ký tự)", flush=True)
-        except Exception as e:
-            print(f"[COOKIE] Lỗi đọc {path}: {e}", flush=True)
+    # Chuẩn hoá: bỏ nháy, gộp xuống dòng/tab, chuẩn hoá dấu ;
+    content = content.strip('"').strip("'")
+    content = " ".join(content.split())
+    content = content.replace(";  ", "; ").replace(" ;", ";")
 
-    return cookie_sets
+    print(f"[COOKIE] ✅ Nạp {os.path.basename(path)} ({len(content)} ký tự)", flush=True)
+    return [{"file": os.path.basename(path), "raw": content}]
 
 
 def parse_cookie(raw: str):
@@ -125,8 +120,8 @@ def get_bal(gf):
 
 
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
-    """ADDED: Transfer ALL current xu về dest_id via game's connection.send.
-    
+    """Transfer ALL current xu về dest_id via game's connection.send.
+
     If WS not connected, reload page (via ensure_ws_connected) and retry.
     Returns dict {success, amount, status, message}.
     """
@@ -208,8 +203,8 @@ def find_gf(page, max_wait=120):
 
 
 def is_account_blocked(gf):
-    """NEW: Check if any visible alert dialog says account is blocked.
-    
+    """Check if any visible alert dialog says account is blocked.
+
     Returns True if account is blocked (skip this cookie entirely).
     """
     try:
@@ -230,8 +225,8 @@ def is_account_blocked(gf):
 
 
 def ensure_ws_connected(gf, page, max_retries=2):
-    """NEW: Check WS state, reload page if disconnected.
-    
+    """Check WS state, reload page if disconnected.
+
     Returns True if WS is now connected (after possible reload).
     """
     try:
@@ -261,8 +256,6 @@ def ensure_ws_connected(gf, page, max_retries=2):
                     ws_ok = new_gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
                     if ws_ok:
                         print(f"  ✓ WS reconnected after reload #{retry+1}", flush=True)
-                        # Update gf reference in caller's scope via mutable container
-                        # (caller should re-call find_gf itself if needed)
                         return True
                 except:
                     pass
@@ -276,10 +269,10 @@ def ensure_ws_connected(gf, page, max_retries=2):
 
 def trigger_and_claim(gf, page):
     """v3 logic + retry + WS reconnect before each claim.
-    
+
     Now requires `page` to call ensure_ws_connected() if WS dies.
     """
-    # NEW: Verify WS is connected before doing anything (reload if dead)
+    # Verify WS is connected before doing anything (reload if dead)
     if not ensure_ws_connected(gf, page, max_retries=1):
         return {"success": False, "error": "ws reconnect failed"}
     # After possible reload, re-find gf
@@ -335,7 +328,7 @@ def trigger_and_claim(gf, page):
     if alert_clicked:
         time.sleep(2)
 
-    # Retry logic: try + 1 retry = 2 total attempts (user requested "retry 1 time")
+    # Retry logic: try + 1 retry = 2 total attempts
     max_attempts = 2
     timeout_ms = 15000
     result = None
@@ -438,7 +431,7 @@ def trigger_and_claim(gf, page):
 # SESSION
 # ============================================================
 def run_one_session(p, fb_cookies, session_id, started_at):
-    """Mở browser → login → MAX_CYCLES → close.
+    """Mở browser → login → MAX_CYCLES → transfer → close.
     Trả về (total, ok, fail, cookies_ok)."""
     print(f"\n########## SESSION {session_id} ##########", flush=True)
 
@@ -529,7 +522,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             pass
         time.sleep(3)
 
-    # ===== ADDED: Check if account is blocked (skip session entirely) =====
+    # ===== Check if account is blocked (skip session entirely) =====
     if is_account_blocked(gf):
         print(f"  ❌ ACCOUNT BLOCKED — skipping this cookie (do NOT retry)", flush=True)
         # Dismiss all alert dialogs
@@ -546,12 +539,12 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         except: pass
         try: browser.close()
         except: pass
-        return 0, 0, 0, False  # cookies_ok=False so main loop skips this cookie
+        return 0, 0, 0, False  # cookies_ok=False so main loop stops
 
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
 
-    # ===== ADDED: Pre-claim transfer — if balance > threshold, transfer first =====
+    # ===== Pre-claim transfer — if balance > threshold, transfer first =====
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
         print(f"\n[Pre-claim] Balance {bal_start_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
@@ -634,7 +627,7 @@ def run_one_session(p, fb_cookies, session_id, started_at):
     print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
           f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
 
-    # ===== ADDED: Transfer all xu về hub account =====
+    # ===== Transfer all xu về hub account =====
     if TRANSFER_ENABLED:
         print(f"\n[SESSION {session_id}] === TRANSFER ALL → {TRANSFER_DEST_ID} ===", flush=True)
         try:
@@ -676,33 +669,17 @@ def run_one_session(p, fb_cookies, session_id, started_at):
 def main():
     print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
           f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}", flush=True)
-    if SINGLE_COOKIE_FILE:
-        print(f"Config: SINGLE_COOKIE_FILE={SINGLE_COOKIE_FILE} (parallel mode — chỉ chạy 1 cookie)", flush=True)
+    print(f"Config: SINGLE_COOKIE_FILE={SINGLE_COOKIE_FILE} "
+          f"(★ CHỈ chạy 1 cookie duy nhất — KHÔNG quét ck*.txt)", flush=True)
 
-    if SINGLE_COOKIE_FILE:
-        # Parallel mode: chỉ load 1 cookie file cụ thể
-        if not os.path.exists(SINGLE_COOKIE_FILE):
-            print(f"[STOP] SINGLE_COOKIE_FILE không tồn tại: {SINGLE_COOKIE_FILE}", flush=True)
-            return 1
-        with open(SINGLE_COOKIE_FILE, "r", encoding="utf-8") as fh:
-            content = fh.read().strip()
-        if not content:
-            print(f"[STOP] {SINGLE_COOKIE_FILE} rỗng", flush=True)
-            return 1
-        content = content.strip('"').strip("'")
-        content = " ".join(content.split())
-        content = content.replace(";  ", "; ").replace(" ;", ";")
-        cookie_sets = [{"file": os.path.basename(SINGLE_COOKIE_FILE), "raw": content}]
-        print(f"[SINGLE] Nạp {SINGLE_COOKIE_FILE} ({len(content)} ký tự)", flush=True)
-    else:
-        cookie_sets = load_all_cookie_sets()
-
+    # ============ ★ CHỈ LOAD ĐÚNG 1 FILE COOKIE ============
+    cookie_sets = load_single_cookie_set(SINGLE_COOKIE_FILE)
     if not cookie_sets:
-        print("[STOP] Không tìm thấy file ck*.txt nào trong repo.", flush=True)
+        print(f"[STOP] Không nạp được cookie từ {SINGLE_COOKIE_FILE}", flush=True)
         return 1
 
-    print(f"\nTìm thấy {len(cookie_sets)} bộ cookie: "
-          f"{[c['file'] for c in cookie_sets]}", flush=True)
+    print(f"\n★ SINGLE COOKIE MODE: chỉ chạy {cookie_sets[0]['file']} "
+          f"— KHÔNG quét ck1, ck3, ck4...", flush=True)
 
     started_at = time.time()
     grand_total = 0
@@ -710,9 +687,8 @@ def main():
     session_id = 0
     cookie_idx = 0
 
-    # Parallel mode: chỉ chạy 1 session (cho 1 cookie), rồi exit
-    # Sequential mode: loop qua tất cả cookies, cycle vô hạn
-    max_iterations = 1 if SINGLE_COOKIE_FILE else 10**9
+    # ★ Chỉ có 1 cookie -> chạy mãi mãi trên cùng tài khoản (tới MAX_RUNTIME)
+    max_iterations = 10**9
 
     with sync_playwright() as p:
         while cookie_idx < max_iterations:
@@ -721,6 +697,7 @@ def main():
                       flush=True)
                 break
 
+            # Vì cookie_sets chỉ có 1 phần tử -> luôn lấy đúng file đó
             entry = cookie_sets[cookie_idx % len(cookie_sets)]
             round_no = cookie_idx // len(cookie_sets) + 1
             cookie_idx += 1
@@ -732,8 +709,8 @@ def main():
 
             fb_cookies = parse_cookie(entry["raw"])
             if not fb_cookies:
-                print(f"[WARN] {entry['file']} parse rỗng, bỏ qua.", flush=True)
-                continue
+                print(f"[WARN] {entry['file']} parse rỗng, dừng bot.", flush=True)
+                break
 
             session_id += 1
             try:
@@ -747,24 +724,18 @@ def main():
             grand_total += total
             grand_ok += ok
 
+            # ★ Cookie hỏng/hết hạn/blocked -> DỪNG BOT (vì chỉ có 1 cookie)
             if not cookies_ok:
-                print(f"[WARN] Cookie {entry['file']} hết hạn — bỏ qua, "
-                      f"chuyển cookie kế tiếp.", flush=True)
-                continue
+                print(f"[STOP] Cookie {entry['file']} hết hạn / bị block — "
+                      f"dừng bot (không còn cookie nào khác để chuyển).", flush=True)
+                break
 
             if time.time() - started_at > MAX_RUNTIME:
                 break
 
-            # Hết 1 vòng cookie?
-            if cookie_idx % len(cookie_sets) == 0:
-                print(f"[CYCLE] Đã xong vòng {round_no} với "
-                      f"{len(cookie_sets)} cookie. Nghỉ {REST}s rồi lặp lại...",
-                      flush=True)
-                time.sleep(REST)
-            else:
-                next_file = cookie_sets[cookie_idx % len(cookie_sets)]['file']
-                print(f"[REST] Nghỉ {REST}s rồi sang {next_file}...", flush=True)
-                time.sleep(REST)
+            # ★ Chỉ có 1 cookie -> nghỉ rồi chạy lại chính nó
+            print(f"[REST] Nghỉ {REST}s rồi chạy lại {entry['file']}...", flush=True)
+            time.sleep(REST)
 
         print("\n" + "=" * 60, flush=True)
         print(f"  TỔNG: {session_id} sessions | {grand_ok} claim ok | "
