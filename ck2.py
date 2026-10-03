@@ -27,7 +27,7 @@ MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", "600"))  # mỗi run (giây)
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 # >>> CHỈ ĐỌC 1 FILE COOKIE CỐ ĐỊNH <<<
-COOKIE_FILE = os.environ.get("COOKIE_FILE", "ck1.txt")
+COOKIE_FILE = os.environ.get("COOKIE_FILE", "ck2.txt")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_PATH = os.path.join(SCRIPT_DIR, COOKIE_FILE)
 
