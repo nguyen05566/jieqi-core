@@ -29,8 +29,8 @@ jobs:
           HEADLESS: 'true'
           COOLDOWN: '3'
           REST_BETWEEN_RUNS: '5'
-          MAX_RUNTIME: '10800'
-          TRANSFER_DEST_ID: '49608454'
+          MAX_RUNTI 51977054ME: '10800'
+          TRANSFER_DEST_ID: '51977054'
           TRANSFER_ENABLED: 'true'
         run: |
           python3 ck2.py
