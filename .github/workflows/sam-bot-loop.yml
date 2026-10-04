@@ -30,7 +30,7 @@ jobs:
           COOLDOWN: '3'
           REST_BETWEEN_RUNS: '5'
           MAX_RUNTIME: '10800'
-          TRANSFER_DEST_ID: '49608454'
+          TRANSFER_DEST_ID: '51977054'
           TRANSFER_ENABLED: 'true'
         run: |
           python3 ck1.py
