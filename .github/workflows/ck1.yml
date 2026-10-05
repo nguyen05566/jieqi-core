@@ -50,7 +50,7 @@ jobs:
             REMAIN=$(( END_TIME - $(date +%s) ))
             echo "=== [$(date '+%H:%M:%S')] Attempt #$ATTEMPT — $REMAIN s remaining ==="
             START=$(date +%s)
-            python3 ck1_fast_40.py
+            python3 ck1_parallel_40.py
             EXIT=$?
             DUR=$(( $(date +%s) - START ))
             echo "=== [$(date '+%H:%M:%S')] Bot exited code=$EXIT after ${DUR}s ==="
