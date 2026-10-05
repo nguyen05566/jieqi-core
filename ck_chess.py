@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
-"""FB Tien Len Mien Nam reward bot v9 — CONTINUOUS MODE
+"""FB Chess Online reward bot v9 — CONTINUOUS MODE
 ★ Claim và transfer LIÊN TỤC, KHÔNG cần close/reload/login
 Login FB và load game 1 LẦN duy nhất ở đầu session, sau đó loop:
   claim (createTable + radio_11 + CREATE + watch video + VIDEO_REWARD) →
   transfer xu → claim → transfer → ... cho tới hết MAX_RUNTIME.
+
+Game URL: https://www.facebook.com/gaming/play/194060244713436/ (Chess Online)
+Cookie: ck_chess.txt (user "Bụi Nguyen", c_user=100051928670915)
+
+⚠ Lưu ý: Chess Online server có thể reject TRANSFER với ok=False và trả
+text lỗi UTF-16 bắt đầu bằng "Playe..." (likely "Player not found" —
+dest_id 68307415 có thể không tồn tại trong Chess Online). Bot sẽ tự
+tắt transfer sau 5 lần fail liên tiếp để không waste effort, và tiếp tục
+claim để tích lũy xu trong account.
 """
 import os, sys, time, re
 
@@ -397,9 +406,13 @@ def is_account_blocked(gf):
 
 
 def ensure_ws_connected(gf, page, max_retries=2):
-    """Check WS state, reload page if disconnected.
+    """Check WS state, navigate to game URL if disconnected.
 
-    Returns True if WS is now connected (after possible reload).
+    Uses page.goto(GAME_URL) instead of page.reload() — page.reload can
+    crash when JS state is complex (we saw 'Page.reload: Page crashed').
+    Fresh navigation via page.goto is more stable.
+
+    Returns True if WS is now connected (after possible re-navigation).
     """
     try:
         ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
@@ -408,18 +421,18 @@ def ensure_ws_connected(gf, page, max_retries=2):
     except Exception:
         pass
 
-    print(f"  ⚠ WS not connected — reloading page...", flush=True)
+    print(f"  ⚠ WS not connected — re-navigating to game URL...", flush=True)
 
     for retry in range(max_retries):
         try:
-            # Reload the parent page (game will reload too)
-            page.reload(wait_until="domcontentloaded", timeout=60000)
+            # ★ Use page.goto instead of page.reload (more stable, avoids 'Page crashed')
+            page.goto(GAME_URL, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(20000)  # 20s for game to load
 
-            # Re-find game frame after reload
+            # Re-find game frame after navigation
             new_gf = find_gf(page, max_wait=60)
             if not new_gf:
-                print(f"  ⚠ Reload #{retry+1}: game frame not found", flush=True)
+                print(f"  ⚠ Re-nav #{retry+1}: game frame not found", flush=True)
                 continue
 
             # Wait for WS connection
@@ -427,15 +440,15 @@ def ensure_ws_connected(gf, page, max_retries=2):
                 try:
                     ws_ok = new_gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
                     if ws_ok:
-                        print(f"  ✓ WS reconnected after reload #{retry+1}", flush=True)
+                        print(f"  ✓ WS reconnected after re-nav #{retry+1}", flush=True)
                         return True
                 except:
                     pass
                 page.wait_for_timeout(3000)
         except Exception as e:
-            print(f"  ⚠ Reload #{retry+1} error: {e}", flush=True)
+            print(f"  ⚠ Re-nav #{retry+1} error: {e}", flush=True)
 
-    print(f"  ❌ WS reconnect failed after {max_retries} reloads", flush=True)
+    print(f"  ❌ WS reconnect failed after {max_retries} re-navigations", flush=True)
     return False
 
 
@@ -751,6 +764,8 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
     total_transferred = 0
     ok = 0
     fail = 0
+    transfer_fail_streak = 0           # consecutive transfer fails
+    transfer_disabled_in_session = False  # set True after 5 consecutive fails
     claim_count = 0
 
     while True:
@@ -805,11 +820,12 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
         bal_after_claim = get_bal(gf)
         bal_after_num = parse_balance_num(bal_after_claim)
 
-        if TRANSFER_ENABLED and bal_after_num > 200:
+        if TRANSFER_ENABLED and not transfer_disabled_in_session and bal_after_num > 200:
             print(f"\n[Transfer #{claim_count}] Balance: {bal_after_claim} → Transferring...", flush=True)
             try:
                 transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                 if transfer_result.get('success'):
+                    transfer_fail_streak = 0  # reset on success
                     amt = transfer_result.get('transferredAmount',
                             transfer_result.get('balance', 0))
                     msg = transfer_result.get('message', '')
@@ -824,36 +840,51 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
                     if send_ok != True or status_src == 'none':
                         print(f"     [debug] sendOk={send_ok} statusSource={status_src}", flush=True)
                 else:
+                    transfer_fail_streak += 1
                     err = transfer_result.get('error', 'unknown')
                     send_ok = transfer_result.get('sendOk', '?')
                     status_src = transfer_result.get('statusSource', '?')
                     bal_after_xfer = transfer_result.get('balanceAfter', '?')
-                    print(f"  ❌ Transfer FAIL: {err}", flush=True)
+                    print(f"  ❌ Transfer FAIL ({transfer_fail_streak}/5): {err}", flush=True)
                     print(f"     [debug] sendOk={send_ok} statusSource={status_src} "
                           f"balAfter={bal_after_xfer}", flush=True)
-                    # Dump respInfo for server-response debugging
-                    resp_info = transfer_result.get('respInfo')
-                    if resp_info:
-                        # Print key fields prominently
-                        if isinstance(resp_info, dict):
-                            print(f"     [resp.command]       : {resp_info.get('command')}", flush=True)
-                            print(f"     [resp.statusAt0]     : {resp_info.get('statusAt0')} "
-                                  f"(byte 0 sau reset offset)", flush=True)
-                            print(f"     [resp.originalOffset] : {resp_info.get('originalOffset')}", flush=True)
-                            print(f"     [resp.firstBytes]    : {resp_info.get('firstBytes')}", flush=True)
-                            print(f"     [resp.manualDecodeUtf16]: {resp_info.get('manualDecodeUtf16')}", flush=True)
-                            print(f"     [resp.manualDecodeAscii]: {resp_info.get('manualDecodeAscii')}", flush=True)
-                            print(f"     [resp.stringFromOffset1]: {resp_info.get('stringFromOffset1')} "
-                                  f"(method={resp_info.get('stringFromOffset1Method')})", flush=True)
-                            print(f"     [resp.keys]          : {resp_info.get('keys')}", flush=True)
-                            print(f"     [resp.methods]       : {resp_info.get('methods')}", flush=True)
-                        else:
-                            print(f"     [respInfo] {resp_info}", flush=True)
+                    # Dump respInfo for server-response debugging (only on first 3 fails to reduce noise)
+                    if transfer_fail_streak <= 3:
+                        resp_info = transfer_result.get('respInfo')
+                        if resp_info:
+                            # Print key fields prominently
+                            if isinstance(resp_info, dict):
+                                print(f"     [resp.command]       : {resp_info.get('command')}", flush=True)
+                                print(f"     [resp.statusAt0]     : {resp_info.get('statusAt0')} "
+                                      f"(byte 0 sau reset offset)", flush=True)
+                                print(f"     [resp.originalOffset] : {resp_info.get('originalOffset')}", flush=True)
+                                print(f"     [resp.firstBytes]    : {resp_info.get('firstBytes')}", flush=True)
+                                print(f"     [resp.manualDecodeUtf16]: {resp_info.get('manualDecodeUtf16')}", flush=True)
+                                print(f"     [resp.manualDecodeAscii]: {resp_info.get('manualDecodeAscii')}", flush=True)
+                                print(f"     [resp.stringFromOffset1]: {resp_info.get('stringFromOffset1')} "
+                                      f"(method={resp_info.get('stringFromOffset1Method')})", flush=True)
+                                print(f"     [resp.keys]          : {resp_info.get('keys')}", flush=True)
+                                print(f"     [resp.methods]       : {resp_info.get('methods')}", flush=True)
+                            else:
+                                print(f"     [respInfo] {resp_info}", flush=True)
                     msg = transfer_result.get('message', '')
                     if msg:
                         print(f"     Server: {msg[:80]}", flush=True)
+                    # Disable transfer for rest of session after 5 consecutive fails
+                    if transfer_fail_streak >= 5:
+                        transfer_disabled_in_session = True
+                        print(f"  ⚠⚠ Transfer fail 5 lần liên tiếp — TẮT transfer cho phần còn lại của session.", flush=True)
+                        print(f"     Xu sẽ tích lũy trong account. Cần fix TRANSFER_DEST_ID hoặc kiểm tra", flush=True)
+                        print(f"     account {TRANSFER_DEST_ID} có tồn tại trong Chess Online hay không.", flush=True)
             except Exception as e:
-                print(f"  ❌ Transfer exception: {e}", flush=True)
+                transfer_fail_streak += 1
+                print(f"  ❌ Transfer exception ({transfer_fail_streak}/5): {e}", flush=True)
+                if transfer_fail_streak >= 5:
+                    transfer_disabled_in_session = True
+                    print(f"  ⚠⚠ Tắt transfer cho session này.", flush=True)
+        elif transfer_disabled_in_session:
+            # Skip silently — bot just keeps claiming, xu accumulates
+            pass
         else:
             print(f"  ⚠ Balance {bal_after_num} ≤ 200, skip transfer", flush=True)
 
