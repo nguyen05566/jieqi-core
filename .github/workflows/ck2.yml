@@ -36,7 +36,7 @@ jobs:
         env:
           MAX_CLAIMS: '1'
           HEADLESS: 'true'
-          COOLDOWN: '3'
+          COOLDOWN: '1'
           REST_BETWEEN_RUNS: '5'
           MAX_RUNTIME: '21000'   # 5h50m, để 10 phút buffer trước khi timeout 6h
           TRANSFER_DEST_ID: '68307415'
