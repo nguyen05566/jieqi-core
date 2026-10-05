@@ -85,5 +85,5 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sleep 5
-          echo "Triggering next ck2 run..."
-          gh workflow run ck2.yml --ref "$GITHUB_REF" || echo "(restart failed)"
+          echo "Triggering next ck3 run..."
+          gh workflow run ck3.yml --ref "$GITHUB_REF" || echo "(restart failed)"
