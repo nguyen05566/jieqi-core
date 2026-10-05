@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""FB Sam loc reward bot v9 — SINGLE COOKIE MODE
-★ CHỈ chạy duy nhất ck2.txt — KHÔNG quét ck1, ck3, ck4...
-Chạy vòng lặp session liên tục trên cùng 1 tài khoản.
-Mỗi session: mở browser → login → MAX_CYCLES → transfer → close → nghỉ REST → lặp lại.
+"""FB Sam loc reward bot v9 — CONTINUOUS MODE
+★ Claim và transfer LIÊN TỤC, KHÔNG cần close/reload/login
+Mỗi lần: claim → transfer → claim → transfer → ... cho đến hết thời gian
 """
 import os, sys, time, re
 
@@ -16,24 +15,21 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
-MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "1"))
+MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "1"))  # Mỗi lần claim 1 lần rồi transfer
 DELAY = float(os.environ.get("COOLDOWN", "3"))
-REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
+REST = int(os.environ.get("REST_BETWEEN_RUNS", "5"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 # ============ TRANSFER LOGIC ============
-# Transfer xu về hub account 68307415 sau mỗi session
+# Transfer xu về hub account 68307415 sau MỖI claim
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "68307415"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
 # ============ SINGLE COOKIE MODE ============
-# ★ CHỈ chạy duy nhất file này — KHÔNG quét ck*.txt
-# Có thể override bằng env SINGLE_COOKIE_FILE nếu muốn đổi file khác.
 SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck1.txt").strip()
 
 # ============ Pre-claim transfer threshold ============
-# Nếu balance > ngưỡng này (xu), transfer trước khi claim tiếp
 PRE_CLAIM_TRANSFER_THRESHOLD = int(os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000"))
 
 
@@ -56,29 +52,21 @@ def parse_balance_num(bal_text):
 # ĐỌC COOKIE TỪ FILE DUY NHẤT
 # ============================================================
 def load_single_cookie_set(path):
-    """
-    Đọc đúng 1 file cookie. Trả về [{"file": "...", "raw": "..."}] hoặc [].
-    """
     if not os.path.exists(path):
         print(f"[COOKIE] ❌ Không tìm thấy file: {path}", flush=True)
         return []
-
     try:
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read().strip()
     except Exception as e:
         print(f"[COOKIE] ❌ Lỗi đọc {path}: {e}", flush=True)
         return []
-
     if not content:
         print(f"[COOKIE] ❌ {path} rỗng", flush=True)
         return []
-
-    # Chuẩn hoá: bỏ nháy, gộp xuống dòng/tab, chuẩn hoá dấu ;
     content = content.strip('"').strip("'")
     content = " ".join(content.split())
     content = content.replace(";  ", "; ").replace(" ;", ";")
-
     print(f"[COOKIE] ✅ Nạp {os.path.basename(path)} ({len(content)} ký tự)", flush=True)
     return [{"file": os.path.basename(path), "raw": content}]
 
@@ -88,15 +76,11 @@ def parse_cookie(raw: str):
     raw = raw.strip().strip('"').strip("'")
     raw = " ".join(raw.split())
     raw = raw.replace(";  ", "; ").replace(" ;", ";")
-
-    # Ưu tiên dùng module bổ trợ nếu có
     if m is not None and hasattr(m, "parse_cookie_header"):
         try:
             return m.parse_cookie_header(raw)
         except Exception:
             pass
-
-    # Fallback: http.cookies chuẩn
     import http.cookies
     parsed = http.cookies.SimpleCookie()
     parsed.load(raw)
@@ -121,15 +105,11 @@ def get_bal(gf):
 
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
     """Transfer ALL current xu về dest_id via game's connection.send.
-
-    If WS not connected, reload page (via ensure_ws_connected) and retry.
     Returns dict {success, amount, status, message}.
     """
     # Ensure WS is connected (reload page if needed)
     if not ensure_ws_connected(gf, page):
         return {"success": False, "error": "ws reconnect failed after reloads"}
-
-    # After reload, re-find game frame (gf may have changed)
     gf_new = find_gf(page, max_wait=30)
     if gf_new:
         gf = gf_new
@@ -138,7 +118,6 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
                 try {
-                    // 1. Read balance from .chipBalance DOM
                     const balEl = document.querySelector('.chipBalance');
                     const balText = balEl ? balEl.textContent.trim() : '0';
                     let balance = 0;
@@ -154,13 +133,11 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                         return;
                     }
 
-                    // 2. Check WS connection (again, after ensure_ws_connected)
                     if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
                         resolve({success: false, error: 'ws not connected', balance: balance});
                         return;
                     }
 
-                    // 3. Send TRANSFER
                     const msg = new OutboundMessage("TRANSFER");
                     msg.writeLong(destId);
                     msg.writeLong(balance);
@@ -203,10 +180,7 @@ def find_gf(page, max_wait=120):
 
 
 def is_account_blocked(gf):
-    """Check if any visible alert dialog says account is blocked.
-
-    Returns True if account is blocked (skip this cookie entirely).
-    """
+    """Check if any visible alert dialog says account is blocked."""
     try:
         blocked = gf.evaluate("""() => {
             const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
@@ -226,7 +200,6 @@ def is_account_blocked(gf):
 
 def ensure_ws_connected(gf, page, max_retries=2):
     """Check WS state, reload page if disconnected.
-
     Returns True if WS is now connected (after possible reload).
     """
     try:
@@ -240,18 +213,13 @@ def ensure_ws_connected(gf, page, max_retries=2):
 
     for retry in range(max_retries):
         try:
-            # Reload the parent page (game will reload too)
             page.reload(wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(20000)  # 20s for game to load
-
-            # Re-find game frame after reload
+            page.wait_for_timeout(20000)
             new_gf = find_gf(page, max_wait=60)
             if not new_gf:
                 print(f"  ⚠ Reload #{retry+1}: game frame not found", flush=True)
                 continue
-
-            # Wait for WS connection
-            for ws_check in range(15):  # 45s wait
+            for ws_check in range(15):
                 try:
                     ws_ok = new_gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
                     if ws_ok:
@@ -262,20 +230,13 @@ def ensure_ws_connected(gf, page, max_retries=2):
                 page.wait_for_timeout(3000)
         except Exception as e:
             print(f"  ⚠ Reload #{retry+1} error: {e}", flush=True)
-
-    print(f"  ❌ WS reconnect failed after {max_retries} reloads", flush=True)
     return False
 
 
 def trigger_and_claim(gf, page):
-    """v3 logic + retry + WS reconnect before each claim.
-
-    Now requires `page` to call ensure_ws_connected() if WS dies.
-    """
-    # Verify WS is connected before doing anything (reload if dead)
+    """v3 logic + retry + WS reconnect before each claim."""
     if not ensure_ws_connected(gf, page, max_retries=1):
         return {"success": False, "error": "ws reconnect failed"}
-    # After possible reload, re-find gf
     gf_new = find_gf(page, max_wait=30)
     if gf_new:
         gf = gf_new
@@ -288,152 +249,77 @@ def trigger_and_claim(gf, page):
 
     try:
         gf.evaluate("""() => {
-            const r = document.getElementById('radio_11');
-            if (r) { r.checked = true; r.dispatchEvent(new Event('change', {bubbles: true})); }
-        }""")
-    except Exception:
-        pass
-    time.sleep(0.5)
-
-    try:
-        gf.evaluate("""() => {
-            const b = document.querySelector('input[name="CREATE"]');
-            if (b) b.click();
-        }""")
-    except Exception:
-        pass
-    time.sleep(3)
-
-    alert_clicked = False
-    try:
-        alert_clicked = gf.evaluate("""() => {
-            const dialogs = document.querySelectorAll('[class*="msgBox"]');
-            for (const d of dialogs) {
-                if (d.offsetParent !== null && d.textContent.includes('enough coin')) {
-                    const buttons = d.querySelectorAll('input[type="button"], button');
-                    for (const b of buttons) {
-                        const val = (b.value || b.textContent || '').toLowerCase();
-                        if (val.includes('watch') || val.includes('video')) {
-                            b.click();
-                            return true;
-                        }
-                    }
-                }
+            const btn = document.querySelector('button[class*="reward"][class*="claim"], button[class*="Claim"]');
+            if (btn && btn.offsetParent !== null) {
+                btn.click();
+                return true;
             }
             return false;
         }""")
     except Exception:
         pass
 
-    if alert_clicked:
-        time.sleep(2)
+    time.sleep(0.5)
 
-    # Retry logic: try + 1 retry = 2 total attempts
-    max_attempts = 2
-    timeout_ms = 15000
-    result = None
-    for attempt in range(max_attempts):
-        try:
-            result = gf.evaluate(f"""() => {{
-                return new Promise((resolve) => {{
-                    try {{
-                        if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {{
-                            resolve({{success: false, error: 'ws not connected'}});
-                            return;
-                        }}
-                        const msg = new OutboundMessage("VIDEO_REWARD");
-                        msg.writeByte(1);
-                        let resolved = false;
-                        connection.send(msg, function(response, success) {{
-                            if (resolved) return;
-                            resolved = true;
-                            if (success) {{
-                                try {{
-                                    const amount = response.readLong();
-                                    if (window.Ads && window.Ads.RewardedVideo) {{
-                                        window.Ads.RewardedVideo.videoIndex++;
-                                        if (window.Ads.RewardedVideo.updateRewardButton)
-                                            window.Ads.RewardedVideo.updateRewardButton();
-                                    }}
-                                    resolve({{success: true, amount: amount}});
-                                }} catch(e) {{
-                                    resolve({{success: true, amount: 0, error: e.toString()}});
-                                }}
-                            }} else {{
-                                resolve({{success: false, error: 'no response'}});
-                            }}
-                        }});
-                        setTimeout(() => {{
-                            if (!resolved) {{ resolved = true; resolve({{success: false, error: 'timeout'}}); }}
-                        }}, {timeout_ms});
-                    }} catch(e) {{
-                        resolve({{success: false, error: e.toString()}});
-                    }}
-                }});
-            }}""")
-        except Exception as e:
-            result = {"success": False, "error": f"evaluate error: {e}"}
-
-        # Check result — if success, break out of retry loop
-        if result.get('success') and result.get('amount', 0) > 0:
-            break
-
-        # If not last attempt, log + try to recover WS before retry
-        if attempt < max_attempts - 1:
-            err = result.get('error', 'unknown')
-            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...", flush=True)
-            # Close stuck msgBox dialogs
-            try:
-                gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
-            except:
-                pass
-            time.sleep(2)
-            # Re-ensure WS connected (reload if needed)
-            if not ensure_ws_connected(gf, page, max_retries=1):
-                print(f"  WS still dead, skip retry", flush=True)
-                break
-            # Re-find gf after reload
-            gf_new = find_gf(page, max_wait=30)
-            if gf_new:
-                gf = gf_new
-            # Re-click watch video button
-            try:
-                gf.evaluate("""() => {
-                    const dialogs = document.querySelectorAll('[class*="msgBox"]');
-                    for (const d of dialogs) {
-                        if (d.offsetParent !== null && d.textContent.includes('enough coin')) {
-                            const buttons = d.querySelectorAll('input[type="button"], button');
-                            for (const b of buttons) {
-                                const val = (b.value || b.textContent || '').toLowerCase();
-                                if (val.includes('watch') || val.includes('video')) {
-                                    b.click();
-                                    return true;
-                                }
-                            }
-                        }
+    try:
+        clicked = gf.evaluate("""() => {
+            const btn = document.querySelector('button[class*="reward"][class*="claim"], button[class*="Claim"]');
+            if (btn && btn.offsetParent !== null && !btn.disabled) {
+                btn.click();
+                return true;
+            }
+            const btns = Array.from(document.querySelectorAll('button'));
+            for (const b of btns) {
+                if (b.offsetParent !== null && !b.disabled) {
+                    const txt = (b.textContent || '').toLowerCase();
+                    if (txt.includes('claim') || txt.includes('nhận') || txt.includes('reward')) {
+                        b.click();
+                        return true;
                     }
-                    return false;
-                }""")
-            except:
-                pass
-            time.sleep(1)
-        else:
-            err = result.get('error', 'unknown')
-            print(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}) — giving up", flush=True)
+                }
+            }
+            return false;
+        }""")
+        if not clicked:
+            return {"success": False, "error": "claim button not found"}
+    except Exception as e:
+        return {"success": False, "error": f"click error: {e}"}
 
-    if not result.get('success') or result.get('amount', 0) == 0:
-        result['method'] = 'alert_clicked' if alert_clicked else 'no_alert'
+    time.sleep(3)
 
-    return result
+    for _ in range(10):
+        try:
+            status = gf.evaluate("""() => {
+                const dialog = document.querySelector('[class*="msgBox"][class*="dialog"]');
+                if (dialog && dialog.offsetParent !== null) {
+                    const txt = (dialog.textContent || '').toLowerCase();
+                    if (txt.includes('success') || txt.includes('thành công') || txt.includes('nhận')) {
+                        return 'ok';
+                    }
+                    if (txt.includes('error') || txt.includes('lỗi') || txt.includes('fail')) {
+                        return 'fail';
+                    }
+                }
+                return 'waiting';
+            }""")
+            if status == 'ok':
+                time.sleep(1)
+                return {"success": True}
+            if status == 'fail':
+                return {"success": False, "error": "claim failed"}
+        except Exception:
+            pass
+        time.sleep(1)
+
+    return {"success": False, "error": "claim timeout"}
 
 
-# ============================================================
-# SESSION
-# ============================================================
-def run_one_session(p, fb_cookies, session_id, started_at):
-    """Mở browser → login → MAX_CYCLES → transfer → close.
-    Trả về (total, ok, fail, cookies_ok)."""
-    print(f"\n########## SESSION {session_id} ##########", flush=True)
+def run_continuous_session(p, fb_cookies, session_id, started_at):
+    """Mở browser → login → game → (claim → transfer → claim → transfer → ...) LIÊN TỤC
+    KHÔNG close browser, KHÔNG reload, KHÔNG login lại
+    Trả về (total, ok, fail, cookies_ok).
+    """
+    print(f"\n########## SESSION {session_id} - CONTINUOUS MODE ##########", flush=True)
 
     browser = p.chromium.launch(
         headless=HEADLESS,
@@ -522,10 +408,9 @@ def run_one_session(p, fb_cookies, session_id, started_at):
             pass
         time.sleep(3)
 
-    # ===== Check if account is blocked (skip session entirely) =====
+    # ===== Check if account is blocked =====
     if is_account_blocked(gf):
-        print(f"  ❌ ACCOUNT BLOCKED — skipping this cookie (do NOT retry)", flush=True)
-        # Dismiss all alert dialogs
+        print(f"  ❌ ACCOUNT BLOCKED — skipping", flush=True)
         try:
             gf.evaluate("""() => {
                 const btns = document.querySelectorAll('input[type="button"], button');
@@ -539,52 +424,29 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         except: pass
         try: browser.close()
         except: pass
-        return 0, 0, 0, False  # cookies_ok=False so main loop stops
+        return 0, 0, 0, False
 
     bal_start = get_bal(gf)
     print(f"  Balance: {bal_start}", flush=True)
 
-    # ===== Pre-claim transfer — if balance > threshold, transfer first =====
-    bal_start_num = parse_balance_num(bal_start)
-    if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
-        print(f"\n[Pre-claim] Balance {bal_start_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
-              f"transferring first...", flush=True)
-        try:
-            pre_transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
-            if pre_transfer_result.get('success'):
-                amt = pre_transfer_result.get('balance', 0)
-                msg = pre_transfer_result.get('message', '')
-                print(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
-                if msg:
-                    print(f"     Server: {msg[:80]}", flush=True)
-                time.sleep(2)
-                bal_start = get_bal(gf)
-                print(f"     Balance after pre-transfer: {bal_start}", flush=True)
-            else:
-                err = pre_transfer_result.get('error', 'unknown')
-                print(f"  ❌ Pre-claim transfer fail: {err}", flush=True)
-                msg = pre_transfer_result.get('message', '')
-                if msg:
-                    print(f"     Server: {msg[:80]}", flush=True)
-        except Exception as e:
-            print(f"  ❌ Pre-claim transfer exception: {e}", flush=True)
-    elif bal_start_num > 0:
-        print(f"  (Balance {bal_start_num:,} ≤ {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
-              f"skip pre-claim transfer)", flush=True)
-
-    # ===== Reward loop =====
-    print(f"\n[4] Reward loop ({MAX_CYCLES} cycles)...", flush=True)
+    # ===== CONTINUOUS LOOP: claim → transfer → claim → transfer → ... =====
+    print(f"\n[4] CONTINUOUS MODE: claim → transfer → claim → transfer → ...", flush=True)
     total = 0
     ok = 0
     fail = 0
-    rewards = []
+    claim_count = 0
 
-    for i in range(MAX_CYCLES):
-        if time.time() - started_at > MAX_RUNTIME:
-            print("  Hết thời gian cho phép, dừng session.", flush=True)
+    while True:
+        elapsed = time.time() - started_at
+        if elapsed > MAX_RUNTIME:
+            print("  Hết thời gian cho phép, dừng.", flush=True)
             break
 
         bal_before = get_bal(gf)
+        bal_before_num = parse_balance_num(bal_before)
+        
+        # ===== CLAIM =====
+        print(f"\n[Claim #{claim_count + 1}] Balance: {bal_before} → Claiming...", flush=True)
         try:
             gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
         except Exception:
@@ -594,157 +456,109 @@ def run_one_session(p, fb_cookies, session_id, started_at):
         try:
             result = trigger_and_claim(gf, page)
         except Exception as e:
-            print(f"  {i+1}: EXCEPTION ({e})", flush=True)
+            print(f"  EXCEPTION ({e})", flush=True)
             fail += 1
             if fail >= 8:
                 break
             time.sleep(DELAY)
             continue
 
-        if result.get('success') and result.get('amount', 0) > 0:
-            amount = result['amount']
-            total += amount
+        if result.get('success'):
             ok += 1
-            rewards.append(amount)
+            claim_count += 1
             time.sleep(1)
-            bal_after = get_bal(gf)
-            print(f"  {i+1}: +{amount} | {bal_before} -> {bal_after} | total={total}",
-                  flush=True)
+            bal_after_claim = get_bal(gf)
+            print(f"  ✅ Claim OK! | {bal_before} -> {bal_after_claim}", flush=True)
             fail = 0
         else:
             fail += 1
             err = result.get('error', 'unknown')
-            print(f"  {i+1}: FAIL ({err}) | {bal_before}", flush=True)
+            print(f"  ❌ Claim FAIL ({err}) | {bal_before}", flush=True)
 
         if fail >= 8:
-            print("  Too many fails, stopping session", flush=True)
+            print("  Too many fails, stopping", flush=True)
             break
 
-        if i < MAX_CYCLES - 1:
-            time.sleep(DELAY)
+        time.sleep(DELAY)
 
-    bal_end = get_bal(gf)
-    print(f"[SESSION {session_id}] Xong | ok={ok} fail={fail} | "
-          f"balance {bal_start} -> {bal_end} | reward={total}", flush=True)
+        # ===== TRANSFER =====
+        bal_after_claim = get_bal(gf)
+        bal_after_num = parse_balance_num(bal_after_claim)
+        
+        if TRANSFER_ENABLED and bal_after_num > 200:
+            print(f"\n[Transfer #{claim_count}] Balance: {bal_after_claim} → Transferring...", flush=True)
+            try:
+                transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
+                if transfer_result.get('success'):
+                    amt = transfer_result.get('balance', 0)
+                    msg = transfer_result.get('message', '')
+                    print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
+                    if msg:
+                        print(f"     Server: {msg[:80]}", flush=True)
+                    time.sleep(2)
+                    bal_after_transfer = get_bal(gf)
+                    print(f"     Balance after transfer: {bal_after_transfer}", flush=True)
+                    total += amt
+                else:
+                    err = transfer_result.get('error', 'unknown')
+                    print(f"  ❌ Transfer FAIL: {err}", flush=True)
+                    msg = transfer_result.get('message', '')
+                    if msg:
+                        print(f"     Server: {msg[:80]}", flush=True)
+            except Exception as e:
+                print(f"  ❌ Transfer exception: {e}", flush=True)
+        else:
+            print(f"  ⚠ Balance {bal_after_num} ≤ 200, skip transfer", flush=True)
 
-    # ===== Transfer all xu về hub account =====
-    if TRANSFER_ENABLED:
-        print(f"\n[SESSION {session_id}] === TRANSFER ALL → {TRANSFER_DEST_ID} ===", flush=True)
-        try:
-            # Brief delay to ensure balance DOM updated
-            time.sleep(2)
-            transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
-            if transfer_result.get('success'):
-                amt = transfer_result.get('balance', 0)
-                msg = transfer_result.get('message', '')
-                print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
-                if msg:
-                    print(f"     Server: {msg[:80]}", flush=True)
-                # Verify new balance
-                time.sleep(2)
-                bal_after_transfer = get_bal(gf)
-                print(f"     Balance after transfer: {bal_after_transfer}", flush=True)
-            else:
-                err = transfer_result.get('error', 'unknown')
-                bal_at_transfer = transfer_result.get('balance', 0)
-                print(f"  ❌ Transfer fail: {err} (balance was {bal_at_transfer})", flush=True)
-                msg = transfer_result.get('message', '')
-                if msg:
-                    print(f"     Server: {msg[:80]}", flush=True)
-        except Exception as e:
-            print(f"  ❌ Transfer exception: {e}", flush=True)
+        time.sleep(DELAY)
 
-    print(f"[SESSION {session_id}] Đóng browser (giữ cookie)...", flush=True)
-    try:
-        browser.close()
-    except Exception:
-        pass
+    print(f"\n[SESSION {session_id}] Xong | ok={ok} fail={fail} | total transferred={total}", flush=True)
 
+    # KHÔNG close browser - giữ session cho lần sau
+    # browser.close()  # ← ĐÃ BỎ DÒNG NÀY
     return total, ok, fail, True
 
 
-# ============================================================
-# MAIN
-# ============================================================
 def main():
+    print("=" * 60)
+    print("FB Sam loc reward bot v9 — CONTINUOUS MODE")
+    print("Claim và transfer LIÊN TỤC, KHÔNG close/reload/login")
+    print("=" * 60)
     print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
-          f"MAX_RUNTIME={MAX_RUNTIME}s HEADLESS={HEADLESS}", flush=True)
-    print(f"Config: SINGLE_COOKIE_FILE={SINGLE_COOKIE_FILE} "
-          f"(★ CHỈ chạy 1 cookie duy nhất — KHÔNG quét ck*.txt)", flush=True)
+          f"TRANSFER_DEST={TRANSFER_DEST_ID}", flush=True)
+    print("=" * 60)
 
-    # ============ ★ CHỈ LOAD ĐÚNG 1 FILE COOKIE ============
-    cookie_sets = load_single_cookie_set(SINGLE_COOKIE_FILE)
-    if not cookie_sets:
-        print(f"[STOP] Không nạp được cookie từ {SINGLE_COOKIE_FILE}", flush=True)
-        return 1
+    fb_cookies = load_single_cookie_set(SINGLE_COOKIE_FILE)
+    if not fb_cookies:
+        print("No valid cookie file found. Exiting.", flush=True)
+        sys.exit(1)
 
-    print(f"\n★ SINGLE COOKIE MODE: chỉ chạy {cookie_sets[0]['file']} "
-          f"— KHÔNG quét ck1, ck3, ck4...", flush=True)
-
-    started_at = time.time()
+    global_start = time.time()
+    session_id = 0
     grand_total = 0
     grand_ok = 0
-    session_id = 0
-    cookie_idx = 0
-
-    # ★ Chỉ có 1 cookie -> chạy mãi mãi trên cùng tài khoản (tới MAX_RUNTIME)
-    max_iterations = 10**9
+    grand_fail = 0
 
     with sync_playwright() as p:
-        while cookie_idx < max_iterations:
-            if time.time() - started_at > MAX_RUNTIME:
-                print(f"\n[TIME UP] Đã chạy {int(time.time()-started_at)}s, thoát.",
-                      flush=True)
-                break
+        # Chỉ chạy 1 session (vì session không close browser)
+        session_id += 1
+        print(f"\n{'=' * 60}")
+        print(f"[Session {session_id}] Starting at {time.strftime('%H:%M:%S')}", flush=True)
+        print(f"{'=' * 60}")
 
-            # Vì cookie_sets chỉ có 1 phần tử -> luôn lấy đúng file đó
-            entry = cookie_sets[cookie_idx % len(cookie_sets)]
-            round_no = cookie_idx // len(cookie_sets) + 1
-            cookie_idx += 1
+        total, ok, fail, cookies_ok = run_continuous_session(p, fb_cookies, session_id, global_start)
+        grand_total += total
+        grand_ok += ok
+        grand_fail += fail
 
-            print(f"\n{'='*60}", flush=True)
-            print(f">>> COOKIE: {entry['file']}  |  vòng {round_no}  "
-                  f"|  lượt #{cookie_idx}", flush=True)
-            print(f"{'='*60}", flush=True)
+        print(f"\n[Session {session_id}] Result: {ok} transfers OK, {fail} fail", flush=True)
+        print(f"[Total] {grand_ok} transfers OK, total xu: {grand_total:,}", flush=True)
 
-            fb_cookies = parse_cookie(entry["raw"])
-            if not fb_cookies:
-                print(f"[WARN] {entry['file']} parse rỗng, dừng bot.", flush=True)
-                break
-
-            session_id += 1
-            try:
-                total, ok, fail, cookies_ok = run_one_session(
-                    p, fb_cookies, session_id, started_at
-                )
-            except Exception as e:
-                print(f"[ERROR] session {session_id}: {e}", flush=True)
-                total, ok, fail, cookies_ok = 0, 0, 0, False
-
-            grand_total += total
-            grand_ok += ok
-
-            # ★ Cookie hỏng/hết hạn/blocked -> DỪNG BOT (vì chỉ có 1 cookie)
-            if not cookies_ok:
-                print(f"[STOP] Cookie {entry['file']} hết hạn / bị block — "
-                      f"dừng bot (không còn cookie nào khác để chuyển).", flush=True)
-                break
-
-            if time.time() - started_at > MAX_RUNTIME:
-                break
-
-            # ★ Chỉ có 1 cookie -> nghỉ rồi chạy lại chính nó
-            print(f"[REST] Nghỉ {REST}s rồi chạy lại {entry['file']}...", flush=True)
-            time.sleep(REST)
-
-        print("\n" + "=" * 60, flush=True)
-        print(f"  TỔNG: {session_id} sessions | {grand_ok} claim ok | "
-              f"{grand_total} coin", flush=True)
-        print(f"  Thời gian: {int(time.time()-started_at)}s", flush=True)
-        print("=" * 60, flush=True)
-
-    return 0
+    print(f"\n{'=' * 60}")
+    print(f"TỔNG: {session_id} session | {grand_ok} transfers ok | "
+          f"{grand_fail} fail | {grand_total:,} xu transferred", flush=True)
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
