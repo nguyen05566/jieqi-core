@@ -528,10 +528,19 @@ def main():
           f"TRANSFER_DEST={TRANSFER_DEST_ID}", flush=True)
     print("=" * 60)
 
-    fb_cookies = load_single_cookie_set(SINGLE_COOKIE_FILE)
-    if not fb_cookies:
+    cookie_entries = load_single_cookie_set(SINGLE_COOKIE_FILE)
+    if not cookie_entries:
         print("No valid cookie file found. Exiting.", flush=True)
         sys.exit(1)
+
+    # ★ Parse chuỗi cookie header thành list cookie dict cho Playwright
+    # (load_single_cookie_set trả về [{"file":..., "raw":...}], chưa parse)
+    entry = cookie_entries[0]
+    fb_cookies = parse_cookie(entry["raw"])
+    if not fb_cookies:
+        print(f"[STOP] Cookie {entry['file']} parse rỗng — có thể định dạng sai.", flush=True)
+        sys.exit(1)
+    print(f"[COOKIE] ✅ Đã parse {len(fb_cookies)} cookies từ {entry['file']}", flush=True)
 
     global_start = time.time()
     session_id = 0
