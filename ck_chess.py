@@ -166,9 +166,89 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                         if (resolved) return;
                         resolved = true;
                         try {
-                            const status = resp.readSignedByte();
-                            const txt = resp.readUtf16String ? resp.readUtf16String() : '';
-                            resolve({success: ok, status: status, message: txt, balance: balance, dest: destId});
+                            // ★ Chess Online's response object may NOT have readSignedByte
+                            // (different SDK than Tien Len). Try multiple methods.
+                            let status = null;
+                            let statusSource = 'none';
+                            try {
+                                if (resp && typeof resp.readSignedByte === 'function') {
+                                    status = resp.readSignedByte(); statusSource = 'readSignedByte';
+                                } else if (resp && typeof resp.readByte === 'function') {
+                                    status = resp.readByte(); statusSource = 'readByte';
+                                } else if (resp && typeof resp.readInt8 === 'function') {
+                                    status = resp.readInt8(); statusSource = 'readInt8';
+                                } else if (resp && typeof resp.getByte === 'function') {
+                                    status = resp.getByte(); statusSource = 'getByte';
+                                } else if (resp && typeof resp[0] === 'number') {
+                                    status = resp[0]; statusSource = 'array[0]';
+                                }
+                            } catch(se) {
+                                statusSource = 'error: ' + se.toString();
+                            }
+
+                            let txt = '';
+                            try {
+                                if (resp && typeof resp.readUtf16String === 'function') {
+                                    txt = resp.readUtf16String();
+                                } else if (resp && typeof resp.readString === 'function') {
+                                    txt = resp.readString();
+                                } else if (resp && typeof resp.readUtf8String === 'function') {
+                                    txt = resp.readUtf8String();
+                                }
+                            } catch(te) {
+                                txt = '(txt error: ' + te.toString() + ')';
+                            }
+
+                            // Inspect resp object for debug
+                            let respInfo = null;
+                            if (ok === false || statusSource === 'none') {
+                                // Only inspect when something looks wrong (avoid noise)
+                                try {
+                                    const proto = resp && resp.constructor ? resp.constructor.name : typeof resp;
+                                    const methods = resp ? Object.getOwnPropertyNames(Object.getPrototypeOf(resp) || {}).filter(n => typeof resp[n] === 'function').slice(0, 20) : [];
+                                    const keys = resp ? Object.keys(resp).slice(0, 20) : [];
+                                    respInfo = {type: proto, methods: methods, keys: keys, ok: ok};
+                                } catch(ie) {
+                                    respInfo = {error: ie.toString()};
+                                }
+                            }
+
+                            // ★ Use server's ok flag as authoritative success indicator
+                            // (don't fail just because we can't read response body)
+                            // Then verify with balance re-read after 2s.
+                            const sendResult = {
+                                sendOk: ok === true || ok === undefined,
+                                status: status,
+                                statusSource: statusSource,
+                                message: txt,
+                                balance: balance,  // balance before transfer (kept for backward compat)
+                                dest: destId,
+                                respInfo: respInfo,
+                            };
+                            // Wait 2s then re-read balance to verify transfer actually happened
+                            setTimeout(() => {
+                                try {
+                                    const balEl2 = document.querySelector('.chipBalance');
+                                    const balText2 = balEl2 ? balEl2.textContent.trim() : '0';
+                                    let balAfter = 0;
+                                    const cleaned2 = balText2.replace(/[^0-9kK.]/g, '');
+                                    if (cleaned2.toLowerCase().endsWith('k')) {
+                                        balAfter = Math.round(parseFloat(cleaned2.slice(0, -1)) * 1000);
+                                    } else if (cleaned2) {
+                                        balAfter = parseInt(cleaned2) || 0;
+                                    }
+                                    const transferred = balance - balAfter;
+                                    sendResult.balanceAfter = balAfter;
+                                    sendResult.transferredAmount = transferred;
+                                    // ★ Authoritative success: balance decreased by > 100 xu
+                                    sendResult.success = transferred > 100;
+                                    resolve(sendResult);
+                                } catch(be) {
+                                    sendResult.error = 'balance re-read fail: ' + be.toString();
+                                    sendResult.success = sendResult.sendOk;
+                                    resolve(sendResult);
+                                }
+                            }, 2000);
                         } catch(e) {
                             resolve({success: ok, error: e.toString(), balance: balance});
                         }
@@ -635,18 +715,31 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             try:
                 transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                 if transfer_result.get('success'):
-                    amt = transfer_result.get('balance', 0)
+                    amt = transfer_result.get('transferredAmount',
+                            transfer_result.get('balance', 0))
                     msg = transfer_result.get('message', '')
                     total_transferred += amt
                     print(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
+                    bal_after_xfer = transfer_result.get('balanceAfter', '?')
+                    print(f"     Balance: {bal_after_claim} → {bal_after_xfer}", flush=True)
                     if msg:
                         print(f"     Server: {msg[:80]}", flush=True)
-                    time.sleep(2)
-                    bal_after_transfer = get_bal(gf)
-                    print(f"     Balance after transfer: {bal_after_transfer}", flush=True)
+                    send_ok = transfer_result.get('sendOk', '?')
+                    status_src = transfer_result.get('statusSource', '?')
+                    if send_ok != True or status_src == 'none':
+                        print(f"     [debug] sendOk={send_ok} statusSource={status_src}", flush=True)
                 else:
                     err = transfer_result.get('error', 'unknown')
+                    send_ok = transfer_result.get('sendOk', '?')
+                    status_src = transfer_result.get('statusSource', '?')
+                    bal_after_xfer = transfer_result.get('balanceAfter', '?')
                     print(f"  ❌ Transfer FAIL: {err}", flush=True)
+                    print(f"     [debug] sendOk={send_ok} statusSource={status_src} "
+                          f"balAfter={bal_after_xfer}", flush=True)
+                    # Dump respInfo for server-response debugging
+                    resp_info = transfer_result.get('respInfo')
+                    if resp_info:
+                        print(f"     [respInfo] {resp_info}", flush=True)
                     msg = transfer_result.get('message', '')
                     if msg:
                         print(f"     Server: {msg[:80]}", flush=True)
