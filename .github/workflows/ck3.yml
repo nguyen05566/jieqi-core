@@ -1,4 +1,4 @@
-name: ck2
+name: ck3
 
 # === CHẠY LIÊN TỤC, KHÔNG CÁCH KHOẢNG ===
 # Cron mỗi 6h làm trigger dự phòng; auto-restart ở cuối job sẽ trigger lại
