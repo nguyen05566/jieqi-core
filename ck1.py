@@ -18,7 +18,7 @@ from playwright.sync_api import sync_playwright
 
 GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
-DELAY = float(os.environ.get("COOLDOWN", "3"))
+DELAY = float(os.environ.get("COOLDOWN", "1"))
 REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
