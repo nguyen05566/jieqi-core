@@ -207,69 +207,101 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                                     const proto = resp && resp.constructor ? resp.constructor.name : typeof resp;
                                     const methods = resp ? Object.getOwnPropertyNames(Object.getPrototypeOf(resp) || {}).filter(n => typeof resp[n] === 'function').slice(0, 20) : [];
                                     const keys = resp ? Object.keys(resp).slice(0, 20) : [];
-                                    // Read extra response info for debugging
+
+                                    // ★ Reset offset to 0 so we can actually read the bytes
+                                    // (Previous bug: offset was 64 > len=61, so readByte returned None)
+                                    let originalOffset = resp.offset;
+                                    try { resp.offset = 0; } catch(_) {}
+
                                     let respCommand = null;
-                                    let respOffset = null;
-                                    let firstBytes = null;
-                                    let tryString = null;
-                                    let tryLong = null;
-                                    let tryLong2 = null;
+                                    let respOffsetStart = null;
                                     try {
                                         respCommand = resp.command;
-                                        respOffset = resp.offset;
+                                        respOffsetStart = originalOffset;
                                     } catch(_) {}
-                                    // Read first byte as status (already done above as 'status')
-                                    // Now try readString() and readLong() for more details
+
+                                    // Try reading byte 0 (after reset) as status
+                                    let statusAt0 = null;
                                     try {
-                                        // Save offset before readString so we can rewind
-                                        const savedOffset = resp.offset;
-                                        if (typeof resp.readString === 'function') {
-                                            tryString = resp.readString();
+                                        if (typeof resp.readByte === 'function') {
+                                            statusAt0 = resp.readByte();
                                         }
-                                        resp.offset = savedOffset;  // rewind
                                     } catch(_) {}
+
+                                    // Now try readString() at offset 1 (skip status byte)
+                                    let stringFromOffset1 = null;
+                                    let stringFromOffset1Method = null;
                                     try {
-                                        const savedOffset2 = resp.offset;
-                                        if (typeof resp.readLong === 'function') {
-                                            tryLong = resp.readLong();
+                                        resp.offset = 1;
+                                        // Try various string readers
+                                        if (typeof resp.readLongAscii === 'function') {
+                                            try { stringFromOffset1 = resp.readLongAscii(); stringFromOffset1Method = 'readLongAscii'; } catch(_) {}
                                         }
-                                        resp.offset = savedOffset2;
-                                        if (typeof resp.readLong === 'function') {
-                                            tryLong2 = resp.readLong();
+                                        if (stringFromOffset1 === null && typeof resp.readString === 'function') {
+                                            try { stringFromOffset1 = resp.readString(); stringFromOffset1Method = 'readString'; } catch(_) {}
                                         }
-                                        resp.offset = savedOffset2;
+                                        if (stringFromOffset1 === null && typeof resp.readAscii === 'function') {
+                                            try { stringFromOffset1 = resp.readAscii(); stringFromOffset1Method = 'readAscii'; } catch(_) {}
+                                        }
                                     } catch(_) {}
-                                    // Dump first 16 bytes of data as hex
+
+                                    // Manual decode: bytes 6+ as UTF-16 LE (skip 6-byte header)
+                                    let manualDecodeUtf16 = null;
+                                    let manualDecodeAscii = null;
                                     try {
-                                        if (resp.data && resp.data.byteLength !== undefined) {
-                                            const arr = new Uint8Array(resp.data);
-                                            const hex = [];
-                                            for (let i = 0; i < Math.min(arr.length, 16); i++) {
-                                                hex.push(arr[i].toString(16).padStart(2, '0'));
+                                        const arr = new Uint8Array(resp.data);
+                                        const len = arr.length;
+                                        // Bytes 6 to end as UTF-16 LE
+                                        const chars = [];
+                                        for (let i = 6; i + 1 < len; i += 2) {
+                                            const code = arr[i] | (arr[i+1] << 8);
+                                            if (code >= 32 && code < 127) {
+                                                chars.push(String.fromCharCode(code));
+                                            } else if (code === 0) {
+                                                chars.push('\\0');
+                                            } else {
+                                                chars.push('[' + code + ']');
                                             }
-                                            firstBytes = '0x' + hex.join(' ') + ` (len=${arr.length})`;
-                                        } else if (resp.data && typeof resp.data.length === 'number') {
-                                            const arr = resp.data;
-                                            const hex = [];
-                                            for (let i = 0; i < Math.min(arr.length, 16); i++) {
-                                                hex.push(arr[i].toString(16).padStart(2, '0'));
-                                            }
-                                            firstBytes = '0x' + hex.join(' ') + ` (len=${arr.length})`;
                                         }
+                                        manualDecodeUtf16 = chars.join('');
+                                        // Also try ASCII from byte 6
+                                        const ascii = [];
+                                        for (let i = 6; i < len; i++) {
+                                            const b = arr[i];
+                                            if (b >= 32 && b < 127) ascii.push(String.fromCharCode(b));
+                                        }
+                                        manualDecodeAscii = ascii.join('');
                                     } catch(_) {}
+
+                                    // Dump first 32 bytes of data as hex
+                                    let firstBytes = null;
+                                    try {
+                                        const arr = new Uint8Array(resp.data);
+                                        const hex = [];
+                                        for (let i = 0; i < Math.min(arr.length, 32); i++) {
+                                            hex.push(arr[i].toString(16).padStart(2, '0'));
+                                        }
+                                        firstBytes = '0x' + hex.join(' ') + ` (len=${arr.length})`;
+                                    } catch(_) {}
+
+                                    // Restore offset
+                                    try { resp.offset = originalOffset; } catch(_) {}
+
                                     respInfo = {
                                         type: proto,
                                         methods: methods,
                                         keys: keys,
                                         ok: ok,
-                                        statusValue: status,
+                                        statusValue: status,            // old (was None due to offset bug)
+                                        statusAt0: statusAt0,            // new: read after offset reset
                                         statusSource: statusSource,
                                         command: respCommand,
-                                        offset: respOffset,
+                                        originalOffset: respOffsetStart,
                                         firstBytes: firstBytes,
-                                        tryString: tryString,
-                                        tryLong1: tryLong,
-                                        tryLong2: tryLong2,
+                                        stringFromOffset1: stringFromOffset1,
+                                        stringFromOffset1Method: stringFromOffset1Method,
+                                        manualDecodeUtf16: manualDecodeUtf16,
+                                        manualDecodeAscii: manualDecodeAscii,
                                     };
                                 } catch(ie) {
                                     respInfo = {error: ie.toString()};
@@ -804,16 +836,17 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
                     if resp_info:
                         # Print key fields prominently
                         if isinstance(resp_info, dict):
-                            print(f"     [resp.command]    : {resp_info.get('command')}", flush=True)
-                            print(f"     [resp.statusValue]: {resp_info.get('statusValue')} "
-                                  f"(from {resp_info.get('statusSource')})", flush=True)
-                            print(f"     [resp.firstBytes] : {resp_info.get('firstBytes')}", flush=True)
-                            print(f"     [resp.tryString]  : {resp_info.get('tryString')}", flush=True)
-                            print(f"     [resp.tryLong1]    : {resp_info.get('tryLong1')}", flush=True)
-                            print(f"     [resp.tryLong2]    : {resp_info.get('tryLong2')}", flush=True)
-                            print(f"     [resp.offset]     : {resp_info.get('offset')}", flush=True)
-                            print(f"     [resp.keys]       : {resp_info.get('keys')}", flush=True)
-                            print(f"     [resp.methods]    : {resp_info.get('methods')}", flush=True)
+                            print(f"     [resp.command]       : {resp_info.get('command')}", flush=True)
+                            print(f"     [resp.statusAt0]     : {resp_info.get('statusAt0')} "
+                                  f"(byte 0 sau reset offset)", flush=True)
+                            print(f"     [resp.originalOffset] : {resp_info.get('originalOffset')}", flush=True)
+                            print(f"     [resp.firstBytes]    : {resp_info.get('firstBytes')}", flush=True)
+                            print(f"     [resp.manualDecodeUtf16]: {resp_info.get('manualDecodeUtf16')}", flush=True)
+                            print(f"     [resp.manualDecodeAscii]: {resp_info.get('manualDecodeAscii')}", flush=True)
+                            print(f"     [resp.stringFromOffset1]: {resp_info.get('stringFromOffset1')} "
+                                  f"(method={resp_info.get('stringFromOffset1Method')})", flush=True)
+                            print(f"     [resp.keys]          : {resp_info.get('keys')}", flush=True)
+                            print(f"     [resp.methods]       : {resp_info.get('methods')}", flush=True)
                         else:
                             print(f"     [respInfo] {resp_info}", flush=True)
                     msg = transfer_result.get('message', '')
