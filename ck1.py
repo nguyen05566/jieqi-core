@@ -94,13 +94,128 @@ def parse_cookie(raw: str):
 # ============================================================
 # HELPER
 # ============================================================
+# Các selector có thể dùng cho balance — thử lần lượt
+BALANCE_SELECTORS = [
+    '.chipBalance',
+    '[class*="chipBalance"]',
+    '[class*="Balance"]',
+    '[class*="balance"]',
+    '[class*="chip"]',
+    '[class*="xu"]',
+    '[class*="coin"]',
+    '[class*="gold"]',
+    '[class*="money"]',
+]
+
+
 def get_bal(gf):
+    """Thử nhiều selector cho tới khi tìm thấy balance."""
+    for sel in BALANCE_SELECTORS:
+        try:
+            txt = gf.evaluate(
+                f"() => (document.querySelector({repr(sel)})?.textContent || '').trim() || ''"
+            )
+            if txt and txt != '?' and txt != '':
+                return txt
+        except Exception:
+            continue
+    return "?"
+
+
+def dump_dom_debug(gf, page, label="claim_fail"):
+    """Dump DOM khi claim/transfer fail để debug selector.
+
+    Lưu screenshot + in log:
+      - Tất cả visible buttons + text + class
+      - Tất cả elements có class liên quan tới balance/xu/coin
+      - Tất cả visible dialogs
+    """
+    print(f"  🔍 DEBUG DOM DUMP ({label}):", flush=True)
     try:
-        return gf.evaluate(
-            "() => document.querySelector('.chipBalance')?.textContent.trim() || '?'"
-        )
-    except Exception:
-        return "?"
+        # Screenshot
+        ts = int(time.time())
+        shot_path = f"/tmp/debug_{label}_{ts}.png"
+        try:
+            page.screenshot(path=shot_path, full_page=True)
+            print(f"     Screenshot: {shot_path}", flush=True)
+        except Exception as e:
+            print(f"     screenshot fail: {e}", flush=True)
+
+        # All visible buttons
+        try:
+            btns = gf.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('button, input[type="button"], input[type="submit"], [role="button"], a[class*="btn"]').forEach(b => {
+                    if (b.offsetParent === null) return;
+                    const txt = (b.textContent || b.value || '').trim().slice(0, 60);
+                    const cls = (b.className || '').toString().slice(0, 100);
+                    const id = (b.id || '').slice(0, 60);
+                    out.push({text: txt, class: cls, id: id, tag: b.tagName});
+                });
+                return out.slice(0, 60);
+            }""")
+            print(f"     Visible buttons ({len(btns)}):", flush=True)
+            for i, b in enumerate(btns[:30]):
+                print(f"       [{i}] <{b['tag']}> text={b['text']!r} class={b['class']!r} id={b['id']!r}", flush=True)
+        except Exception as e:
+            print(f"     buttons dump fail: {e}", flush=True)
+
+        # Elements with balance-related classes
+        try:
+            bal_els = gf.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('[class*="balance"], [class*="Balance"], [class*="chip"], [class*="xu"], [class*="coin"], [class*="Xu"], [class*="Coin"]').forEach(el => {
+                    if (el.offsetParent === null) return;
+                    out.push({
+                        text: (el.textContent || '').trim().slice(0, 80),
+                        class: (el.className || '').toString().slice(0, 100),
+                        tag: el.tagName
+                    });
+                });
+                return out.slice(0, 30);
+            }""")
+            print(f"     Balance-like elements ({len(bal_els)}):", flush=True)
+            for i, e in enumerate(bal_els[:15]):
+                print(f"       [{i}] <{e['tag']}> text={e['text']!r} class={e['class']!r}", flush=True)
+        except Exception as e:
+            print(f"     balance dump fail: {e}", flush=True)
+
+        # Visible dialogs/alerts
+        try:
+            dialogs = gf.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"], [class*="popup"], [class*="Popup"], [class*="modal"], [class*="Modal"]').forEach(d => {
+                    if (d.offsetParent === null) return;
+                    out.push({
+                        text: (d.textContent || '').trim().slice(0, 200),
+                        class: (d.className || '').toString().slice(0, 100)
+                    });
+                });
+                return out.slice(0, 10);
+            }""")
+            print(f"     Visible dialogs ({len(dialogs)}):", flush=True)
+            for i, d in enumerate(dialogs[:5]):
+                print(f"       [{i}] class={d['class']!r} text={d['text']!r}", flush=True)
+        except Exception as e:
+            print(f"     dialogs dump fail: {e}", flush=True)
+
+        # Available JS globals
+        try:
+            funcs = gf.evaluate("""() => {
+                const names = [];
+                for (const k of Object.keys(window)) {
+                    if (typeof window[k] === 'function' && !k.startsWith('_')) {
+                        names.push(k);
+                    }
+                }
+                return names.slice(0, 50);
+            }""")
+            print(f"     Window functions ({len(funcs)}): {funcs[:30]}", flush=True)
+        except Exception as e:
+            print(f"     funcs dump fail: {e}", flush=True)
+
+    except Exception as e:
+        print(f"     dump_dom_debug exception: {e}", flush=True)
 
 
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
@@ -115,11 +230,19 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
         gf = gf_new
 
     try:
-        result = gf.evaluate("""(destId) => {
+        result = gf.evaluate("""(destId, balSelectors) => {
             return new Promise((resolve) => {
                 try {
-                    const balEl = document.querySelector('.chipBalance');
-                    const balText = balEl ? balEl.textContent.trim() : '0';
+                    // Thử nhiều selector cho balance
+                    let balEl = null;
+                    let balText = '0';
+                    for (const sel of balSelectors) {
+                        balEl = document.querySelector(sel);
+                        if (balEl && balEl.textContent && balEl.textContent.trim()) {
+                            balText = balEl.textContent.trim();
+                            break;
+                        }
+                    }
                     let balance = 0;
                     const cleaned = balText.replace(/[^0-9kK.]/g, '');
                     if (cleaned.toLowerCase().endsWith('k')) {
@@ -129,7 +252,7 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                     }
 
                     if (balance < 200) {
-                        resolve({success: false, error: 'balance < 200', balance: balance});
+                        resolve({success: false, error: 'balance < 200', balance: balance, balText: balText});
                         return;
                     }
 
@@ -163,7 +286,7 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                     resolve({success: false, error: e.toString()});
                 }
             });
-        }""", dest_id)
+        }""", dest_id, BALANCE_SELECTORS)
         return result
     except Exception as e:
         return {"success": False, "error": f"evaluate error: {e}"}
@@ -272,7 +395,7 @@ def trigger_and_claim(gf, page):
             for (const b of btns) {
                 if (b.offsetParent !== null && !b.disabled) {
                     const txt = (b.textContent || '').toLowerCase();
-                    if (txt.includes('claim') || txt.includes('nhận') || txt.includes('reward')) {
+                    if (txt.includes('claim') || txt.includes('nhận') || txt.includes('reward') || txt.includes('lấy')) {
                         b.click();
                         return true;
                     }
@@ -281,7 +404,9 @@ def trigger_and_claim(gf, page):
             return false;
         }""")
         if not clicked:
-            return {"success": False, "error": "claim button not found"}
+            # ★ Dump DOM để debug — selector cho Sam Loc có thể không khớp Tien Len
+            dump_dom_debug(gf, page, label="claim_btn_not_found")
+            return {"success": False, "error": "claim button not found (dumped DOM for debug)"}
     except Exception as e:
         return {"success": False, "error": f"click error: {e}"}
 
