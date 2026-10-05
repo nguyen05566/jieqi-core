@@ -207,7 +207,70 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
                                     const proto = resp && resp.constructor ? resp.constructor.name : typeof resp;
                                     const methods = resp ? Object.getOwnPropertyNames(Object.getPrototypeOf(resp) || {}).filter(n => typeof resp[n] === 'function').slice(0, 20) : [];
                                     const keys = resp ? Object.keys(resp).slice(0, 20) : [];
-                                    respInfo = {type: proto, methods: methods, keys: keys, ok: ok};
+                                    // Read extra response info for debugging
+                                    let respCommand = null;
+                                    let respOffset = null;
+                                    let firstBytes = null;
+                                    let tryString = null;
+                                    let tryLong = null;
+                                    let tryLong2 = null;
+                                    try {
+                                        respCommand = resp.command;
+                                        respOffset = resp.offset;
+                                    } catch(_) {}
+                                    // Read first byte as status (already done above as 'status')
+                                    // Now try readString() and readLong() for more details
+                                    try {
+                                        // Save offset before readString so we can rewind
+                                        const savedOffset = resp.offset;
+                                        if (typeof resp.readString === 'function') {
+                                            tryString = resp.readString();
+                                        }
+                                        resp.offset = savedOffset;  // rewind
+                                    } catch(_) {}
+                                    try {
+                                        const savedOffset2 = resp.offset;
+                                        if (typeof resp.readLong === 'function') {
+                                            tryLong = resp.readLong();
+                                        }
+                                        resp.offset = savedOffset2;
+                                        if (typeof resp.readLong === 'function') {
+                                            tryLong2 = resp.readLong();
+                                        }
+                                        resp.offset = savedOffset2;
+                                    } catch(_) {}
+                                    // Dump first 16 bytes of data as hex
+                                    try {
+                                        if (resp.data && resp.data.byteLength !== undefined) {
+                                            const arr = new Uint8Array(resp.data);
+                                            const hex = [];
+                                            for (let i = 0; i < Math.min(arr.length, 16); i++) {
+                                                hex.push(arr[i].toString(16).padStart(2, '0'));
+                                            }
+                                            firstBytes = '0x' + hex.join(' ') + ` (len=${arr.length})`;
+                                        } else if (resp.data && typeof resp.data.length === 'number') {
+                                            const arr = resp.data;
+                                            const hex = [];
+                                            for (let i = 0; i < Math.min(arr.length, 16); i++) {
+                                                hex.push(arr[i].toString(16).padStart(2, '0'));
+                                            }
+                                            firstBytes = '0x' + hex.join(' ') + ` (len=${arr.length})`;
+                                        }
+                                    } catch(_) {}
+                                    respInfo = {
+                                        type: proto,
+                                        methods: methods,
+                                        keys: keys,
+                                        ok: ok,
+                                        statusValue: status,
+                                        statusSource: statusSource,
+                                        command: respCommand,
+                                        offset: respOffset,
+                                        firstBytes: firstBytes,
+                                        tryString: tryString,
+                                        tryLong1: tryLong,
+                                        tryLong2: tryLong2,
+                                    };
                                 } catch(ie) {
                                     respInfo = {error: ie.toString()};
                                 }
@@ -739,7 +802,20 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
                     # Dump respInfo for server-response debugging
                     resp_info = transfer_result.get('respInfo')
                     if resp_info:
-                        print(f"     [respInfo] {resp_info}", flush=True)
+                        # Print key fields prominently
+                        if isinstance(resp_info, dict):
+                            print(f"     [resp.command]    : {resp_info.get('command')}", flush=True)
+                            print(f"     [resp.statusValue]: {resp_info.get('statusValue')} "
+                                  f"(from {resp_info.get('statusSource')})", flush=True)
+                            print(f"     [resp.firstBytes] : {resp_info.get('firstBytes')}", flush=True)
+                            print(f"     [resp.tryString]  : {resp_info.get('tryString')}", flush=True)
+                            print(f"     [resp.tryLong1]    : {resp_info.get('tryLong1')}", flush=True)
+                            print(f"     [resp.tryLong2]    : {resp_info.get('tryLong2')}", flush=True)
+                            print(f"     [resp.offset]     : {resp_info.get('offset')}", flush=True)
+                            print(f"     [resp.keys]       : {resp_info.get('keys')}", flush=True)
+                            print(f"     [resp.methods]    : {resp_info.get('methods')}", flush=True)
+                        else:
+                            print(f"     [respInfo] {resp_info}", flush=True)
                     msg = transfer_result.get('message', '')
                     if msg:
                         print(f"     Server: {msg[:80]}", flush=True)
