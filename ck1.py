@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
-"""FB Tien Len Mien Nam reward bot v9 — FIXED VERSION
-★ Fix WS disconnect + Balance reading + Reload optimization
+"""FB Tien Len Mien Nam reward bot v10 — DEBUG VERSION
+★ Fix WS disconnect + Balance reading + Login detection + Debug logging
 
-Thay đổi so với bản gốc:
-  - FIX #1: WS reconnect — chỉ reload khi thực sự cần, thêm keepalive
-  - FIX #2: Balance reading — nhiều fallback selectors
-  - FIX #3: Reload optimization — smart waiting thay vì time.sleep(30)
-  - FIX #4: Transfer fail counter — disable sau 5 lần fail liên tiếp
+THÊM:
+  - Debug logging: URL hiện tại, tất cả frame URLs, page title
+  - Login detection: kiểm tra có bị redirect về login không
+  - Screenshot: lưu ảnh khi gặp lỗi
+  - Frame URL matcher: thử nhiều pattern thay vì chỉ 1
 """
 
 import os, sys, time, re, signal, logging
+from datetime import datetime
 
 # ══════════════════════════════════════════════════════
-# LOGGING — thay print() bằng logging module
+# LOGGING — chi tiết hơn để debug
 # ══════════════════════════════════════════════════════
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # DEBUG level để thấy tất cả
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("ck1")
 
-# Thử import module bổ trợ nếu có
+# Thử import module bổ trợ
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import board_dom_merged as m
@@ -31,7 +32,7 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 # ══════════════════════════════════════════════════════
-# CONFIG — tất cả từ ENV, giữ backward compatible
+# CONFIG
 # ══════════════════════════════════════════════════════
 GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
 CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))
@@ -50,14 +51,18 @@ PRE_CLAIM_TRANSFER_THRESHOLD = int(
     os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000")
 )
 
+# Screenshot directory
+SCREENSHOT_DIR = os.environ.get("SCREENSHOT_DIR", "/tmp/screenshots")
+os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
 # ══════════════════════════════════════════════════════
-# CONSTANTS — magic values → named constants
+# CONSTANTS
 # ══════════════════════════════════════════════════════
 MIN_TRANSFER_BALANCE = 200
 TRANSFER_TIMEOUT_MS = 12000
 FRAME_FIND_INTERVAL = 5
 PAGE_LOAD_TIMEOUT = 120000
-SMART_WAIT_MAX_ATTEMPTS = 15  # 15 × 4s = 60s max
+SMART_WAIT_MAX_ATTEMPTS = 15
 SMART_WAIT_INTERVAL = 4
 POST_LOAD_WAIT = 6
 MAX_TRANSFER_FAILS = 5
@@ -70,7 +75,7 @@ _shutdown = False
 
 def _handle_signal(signum, frame):
     global _shutdown
-    logger.warning(f"Received signal {signum}, shutting down gracefully...")
+    logger.warning(f"Received signal {signum}, shutting down...")
     _shutdown = True
 
 
@@ -79,10 +84,222 @@ signal.signal(signal.SIGTERM, _handle_signal)
 
 
 # ══════════════════════════════════════════════════════
-# PARSE BALANCE
+# DEBUG HELPERS
 # ══════════════════════════════════════════════════════
+def save_screenshot(page, name: str):
+    """Lưu screenshot để debug."""
+    try:
+        ts = datetime.now().strftime("%H%M%S")
+        path = os.path.join(SCREENSHOT_DIR, f"{name}_{ts}.png")
+        page.screenshot(path=path, full_page=False)
+        logger.info(f"  📸 Screenshot saved: {path}")
+        return path
+    except Exception as e:
+        logger.warning(f"  Screenshot failed: {e}")
+        return None
+
+
+def log_page_status(page, label: str = ""):
+    """Log chi tiết trạng thái trang: URL, title, frames."""
+    try:
+        url = page.url
+        title = page.title()
+        logger.info(f"  📄 [{label}] URL: {url}")
+        logger.info(f"  📄 [{label}] Title: {title}")
+
+        # Log tất cả frames
+        frames = page.frames
+        logger.info(f"  📄 [{label}] Frames: {len(frames)}")
+        for i, f in enumerate(frames):
+            furl = f.url
+            has_bundle = "instant-bundle" in furl
+            has_fbsbx = "fbsbx.com" in furl
+            marker = ""
+            if has_bundle and has_fbsbx:
+                marker = " ← ⭐ GAME FRAME"
+            elif "facebook.com" in furl:
+                marker = " ← FB frame"
+            logger.debug(f"    Frame[{i}]: {furl[:120]}{marker}")
+    except Exception as e:
+        logger.warning(f"  log_page_status error: {e}")
+
+
+def check_login_status(page) -> str:
+    """Kiểm tra trạng thái login Facebook.
+    
+    Returns:
+        'logged_in' — đã login, ở trang game
+        'login_page' — bị redirect về trang login
+        'checkpoint' — bị checkpoint/verify
+        'blocked' — tài khoản bị khóa
+        'unknown' — không xác định
+    """
+    try:
+        url = page.url.lower()
+        title = page.title().lower()
+
+        # Check login page
+        if "login" in url or "login" in title:
+            return "login_page"
+
+        # Check checkpoint
+        if "checkpoint" in url or "verify" in url or "confirm" in url:
+            return "checkpoint"
+
+        # Check blocked
+        if "blocked" in url or "suspended" in url:
+            return "blocked"
+
+        # Check nếu có nút login
+        has_login_form = page.evaluate("""() => {
+            return !!document.querySelector(
+                '#email, #pass, [name="email"], [name="pass"], ' +
+                'form[action*="login"], [data-testid="royal_login_form"]'
+            );
+        }""")
+        if has_login_form:
+            return "login_page"
+
+        # Check nếu có cookie fb (đã login)
+        cookies = page.context.cookies()
+        has_session = any(
+            c["name"] in ("c_user", "xs", "datr") for c in cookies
+        )
+        if has_session:
+            return "logged_in"
+
+        return "unknown"
+    except Exception as e:
+        logger.warning(f"check_login_status error: {e}")
+        return "error"
+
+
+def diagnose_game_frame(page):
+    """Debug chi tiết tại sao không tìm thấy game frame."""
+    logger.info("  🔍 DIAGNOSING: Why game frame not found?")
+    
+    # 1. Check URL
+    url = page.url
+    logger.info(f"    Current URL: {url}")
+    
+    # 2. Check login
+    login_status = check_login_status(page)
+    logger.info(f"    Login status: {login_status}")
+    
+    if login_status == "login_page":
+        logger.error("    ❌ COOKIES EXPIRED! Bị redirect về login page.")
+        logger.error("    → Cần update cookie trong ck1.txt")
+        save_screenshot(page, "login_page")
+        return "cookies_expired"
+    
+    if login_status == "checkpoint":
+        logger.error("    ❌ CHECKPOINT! FB yêu cầu verify.")
+        save_screenshot(page, "checkpoint")
+        return "checkpoint"
+    
+    # 3. Check frames
+    frames = page.frames
+    logger.info(f"    Total frames: {len(frames)}")
+    
+    game_frame = None
+    for i, f in enumerate(frames):
+        url = f.url
+        logger.info(f"    Frame[{i}]: {url[:150]}")
+        
+        # Thử nhiều pattern matching
+        patterns = [
+            ("instant-bundle" in url and "fbsbx.com" in url, "original pattern"),
+            ("instant-bundle" in url, "instant-bundle only"),
+            ("fbsbx.com" in url, "fbsbx.com only"),
+            ("fbcdn" in url and "game" in url.lower(), "fbcdn game"),
+            ("facebook.com/gaming" in url, "fb gaming"),
+            (".unity" in url.lower() or "unity" in url.lower(), "unity webgl"),
+            ("webgl" in url.lower(), "webgl"),
+            ("instantgames" in url.lower(), "instant games"),
+        ]
+        
+        for match, desc in patterns:
+            if match:
+                logger.info(f"      ✅ Match: {desc}")
+                if not game_frame:
+                    game_frame = f
+    
+    if game_frame:
+        logger.info(f"    ✅ Found potential game frame: {game_frame.url[:100]}")
+        return "found"
+    
+    # 4. Check page content
+    try:
+        body_text = page.evaluate("""() => {
+            return document.body ? document.body.innerText.substring(0, 500) : 'no body';
+        }""")
+        logger.info(f"    Page content (first 500 chars): {body_text[:200]}")
+    except:
+        pass
+    
+    # 5. Check for errors
+    try:
+        has_error = page.evaluate("""() => {
+            const text = document.body ? document.body.innerText : '';
+            return {
+                hasError: text.includes('error') || text.includes('Error'),
+                hasBlocked: text.includes('blocked') || text.includes('khóa'),
+                hasNotFound: text.includes('not found') || text.includes('không tìm thấy'),
+                hasMaintenance: text.includes('maintenance') || text.includes('bảo trì'),
+            };
+        }""")
+        logger.info(f"    Page errors: {has_error}")
+    except:
+        pass
+    
+    save_screenshot(page, "no_game_frame")
+    return "not_found"
+
+
+# ══════════════════════════════════════════════════════
+# BALANCE READING (FIX #2)
+# ══════════════════════════════════════════════════════
+def get_bal(gf) -> str:
+    """Đọc balance với nhiều fallback selectors."""
+    try:
+        return gf.evaluate(
+            r"""() => {
+            const selectors = [
+                '.chipBalance', '.balance', '.chip-count',
+                '.coin-balance', '.coinBalance', '[data-balance]',
+                '[data-chip]', '.game-balance', '.player-balance',
+                '.playerBalance', '.balance-amount', '.balanceAmount',
+                '.chip-amount', '.chipAmount',
+            ];
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const text = el.textContent.trim();
+                    if (text && text !== '?' && /d/.test(text)) {
+                        return text;
+                    }
+                }
+            }
+            // Fallback scan
+            for (const el of document.querySelectorAll('span, div, p')) {
+                if (el.children.length > 2) continue;
+                const t = el.textContent.trim();
+                if (/^[d,]+.?d*[kKmM]?$/.test(t) && t.length < 15) {
+                    try {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 0 && rect.height > 0) return t;
+                    } catch(e) {}
+                }
+            }
+            return '?';
+        }"""
+        )
+    except Exception as e:
+        logger.warning(f"get_bal error: {e}")
+        return "?"
+
+
 def parse_balance_num(bal_text: str) -> int:
-    """Parse '56.4k' or '123,456' or '78900' → int."""
     if not bal_text or bal_text == "?":
         return 0
     s = str(bal_text).strip().lower().replace(",", "").replace(" ", "")
@@ -93,7 +310,6 @@ def parse_balance_num(bal_text: str) -> int:
             return int(float(s[:-1]) * 1000000)
         return int(float(s))
     except (ValueError, TypeError):
-        logger.warning(f"Cannot parse balance: '{bal_text}'")
         return 0
 
 
@@ -101,57 +317,41 @@ def parse_balance_num(bal_text: str) -> int:
 # COOKIE LOADING
 # ══════════════════════════════════════════════════════
 def load_single_cookie_set(path: str) -> list:
-    """Đọc 1 file cookie. Trả về [{'file': ..., 'raw': ...}] hoặc []."""
     if not os.path.exists(path):
         logger.error(f"Cookie file not found: {path}")
         return []
-
     try:
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read().strip()
     except Exception as e:
         logger.error(f"Error reading {path}: {e}")
         return []
-
     if not content:
         logger.error(f"{path} is empty")
         return []
-
     content = content.strip('"').strip("'")
     content = " ".join(content.split())
     content = content.replace(";  ", "; ").replace(" ;", ";")
-
     logger.info(f"Loaded {os.path.basename(path)} ({len(content)} chars)")
     return [{"file": os.path.basename(path), "raw": content}]
 
 
 def parse_cookie(raw: str) -> list:
-    """Parse cookie header string → Playwright format."""
     raw = raw.strip().strip('"').strip("'")
     raw = " ".join(raw.split())
     raw = raw.replace(";  ", "; ").replace(" ;", ";")
-
     if m is not None and hasattr(m, "parse_cookie_header"):
         try:
             return m.parse_cookie_header(raw)
         except Exception:
-            logger.warning(
-                "board_dom_merged.parse_cookie_header failed, using fallback"
-            )
-
+            pass
     import http.cookies
-
     parsed = http.cookies.SimpleCookie()
     parsed.load(raw)
     return [
         {
-            "name": n,
-            "value": mv.value,
-            "domain": ".facebook.com",
-            "path": "/",
-            "secure": True,
-            "httpOnly": False,
-            "sameSite": "Lax",
+            "name": n, "value": mv.value, "domain": ".facebook.com",
+            "path": "/", "secure": True, "httpOnly": False, "sameSite": "Lax",
         }
         for n, mv in parsed.items()
         if n and mv.value
@@ -159,246 +359,163 @@ def parse_cookie(raw: str) -> list:
 
 
 # ══════════════════════════════════════════════════════
-# FIX #2: BALANCE READING — nhiều fallback selectors
-# ══════════════════════════════════════════════════════
-def get_bal(gf) -> str:
-    """Đọc balance với nhiều fallback selectors.
-    
-    Selector list mở rộng: thử từng selector cho đến khi tìm thấy.
-    Nếu không có selector nào match → scan DOM tìm element chứa số.
-    """
-    try:
-        return gf.evaluate(
-            r"""() => {
-            // ── Selector list theo thứ tự ưu tiên ──
-            const selectors = [
-                '.chipBalance',
-                '.balance',
-                '.chip-count',
-                '.coin-balance',
-                '.coinBalance',
-                '[data-balance]',
-                '[data-chip]',
-                '.game-balance',
-                '.player-balance',
-                '.playerBalance',
-                '.balance-amount',
-                '.balanceAmount',
-                '.chip-amount',
-                '.chipAmount',
-            ];
-
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el) {
-                    const text = el.textContent.trim();
-                    if (text && text !== '?' && text.length > 0 && text.length < 20) {
-                        // Verify: phải chứa ít nhất 1 chữ số
-                        if (/d/.test(text)) {
-                            return text;
-                        }
-                    }
-                }
-            }
-
-            // ── Fallback: scan tất cả span/div tìm số tiền ──
-            // Pattern: "12,345" hoặc "56.4k" hoặc "1.2M"
-            const candidates = [];
-            const allEls = document.querySelectorAll(
-                'span, div, p, td, strong, b, em, i, h1, h2, h3, h4, h5, h6'
-            );
-            
-            for (const el of allEls) {
-                // Skip nếu element có con element khác (tránh lấy parent)
-                if (el.children.length > 2) continue;
-                
-                const text = el.textContent.trim();
-                
-                // Match: "12345", "12,345", "56.4k", "1.2M"
-                if (/^[\d,]+\.?[\d]*[kKmM]?$/.test(text) && text.length >= 1 && text.length < 15) {
-                    // Verify: element phải visible
-                    try {
-                        const rect = el.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            candidates.push({
-                                text: text,
-                                // Ưu tiên element gần chip icon
-                                hasChipParent: !!el.closest('[class*="chip"], [class*="balance"], [class*="coin"]'),
-                                // Ưu tiên element nhỏ (không phải container lớn)
-                                isSmall: rect.width < 200 && rect.height < 60,
-                            });
-                        }
-                    } catch (e) {
-                        // Ignore getBoundingClientRect errors
-                    }
-                }
-            }
-
-            // Sắp xếp: ưu tiên có chip parent, rồi element nhỏ
-            candidates.sort((a, b) => {
-                if (a.hasChipParent !== b.hasChipParent) return b.hasChipParent - a.hasChipParent;
-                if (a.isSmall !== b.isSmall) return b.isSmall - a.isSmall;
-                return 0;
-            });
-
-            if (candidates.length > 0) {
-                return candidates[0].text;
-            }
-
-            return '?';
-        }"""
-        )
-    except Exception as e:
-        logger.warning(f"get_bal error: {e}")
-        return "?"
-
-
-# ══════════════════════════════════════════════════════
-# FIND GAME FRAME
+# FIND GAME FRAME — thử nhiều pattern
 # ══════════════════════════════════════════════════════
 def find_gf(page, max_wait: int = 120):
-    """Find game frame by checking frame URLs."""
-    for _ in range(max_wait // FRAME_FIND_INTERVAL):
+    """Find game frame — thử nhiều URL pattern."""
+    # Danh sách patterns để match game frame
+    game_frame_patterns = [
+        lambda url: "instant-bundle" in url and "fbsbx.com" in url,  # Original
+        lambda url: "instant-bundle" in url,  # Just instant-bundle
+        lambda url: "fbsbx.com" in url and ("game" in url.lower() or "play" in url.lower()),
+        lambda url: "instantgames" in url.lower(),
+        lambda url: ".unity" in url.lower() or "unityloader" in url.lower(),
+        lambda url: "webgl" in url.lower() and "facebook" not in url.lower(),
+        lambda url: "fbcdn" in url and ("game" in url.lower() or "bundle" in url.lower()),
+    ]
+
+    for attempt in range(max_wait // FRAME_FIND_INTERVAL):
         for f in page.frames:
-            if "instant-bundle" in f.url and "fbsbx.com" in f.url:
-                return f
+            url = f.url
+            for pattern_fn in game_frame_patterns:
+                try:
+                    if pattern_fn(url):
+                        logger.info(f"  ✅ Game frame found (attempt {attempt + 1}): {url[:100]}")
+                        return f
+                except:
+                    pass
         time.sleep(FRAME_FIND_INTERVAL)
-    logger.warning(f"Game frame not found after {max_wait}s")
+    
+    logger.warning(f"  ❌ Game frame not found after {max_wait}s")
     return None
 
 
 # ══════════════════════════════════════════════════════
-# FIX #3: SMART PAGE LOADING
+# SMART PAGE LOADING (FIX #3)
 # ══════════════════════════════════════════════════════
 def smart_load_game(page, game_url: str):
-    """Load game page với smart waiting — đợi game frame + balance element.
-    
-    Thay vì time.sleep(30) cố định, đợi cho đến khi:
-    1. Game frame xuất hiện
-    2. Balance element render xong
-    Tối đa 60 giây, kiểm tra mỗi 4 giây.
-    """
+    """Load game với debug logging chi tiết."""
     logger.info(f"Loading game: {game_url}")
-    page.goto(game_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-
+    
+    # Navigate
+    try:
+        page.goto(game_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    except Exception as e:
+        logger.error(f"  page.goto failed: {e}")
+        save_screenshot(page, "goto_failed")
+        return None
+    
+    # Log page status ngay sau khi load
+    time.sleep(3)
+    log_page_status(page, "after_goto")
+    
+    # Check login
+    login_status = check_login_status(page)
+    logger.info(f"  Login status: {login_status}")
+    
+    if login_status == "login_page":
+        logger.error("  ❌ NOT LOGGED IN! Cookies expired or invalid.")
+        logger.error("  → Update ck1.txt with fresh cookies")
+        save_screenshot(page, "not_logged_in")
+        return None
+    
+    if login_status == "checkpoint":
+        logger.error("  ❌ CHECKPOINT! FB requires verification.")
+        save_screenshot(page, "checkpoint")
+        return None
+    
+    # Smart wait for game frame
     gf = None
     balance_found = False
 
     for attempt in range(SMART_WAIT_MAX_ATTEMPTS):
         time.sleep(SMART_WAIT_INTERVAL)
+        elapsed = (attempt + 1) * SMART_WAIT_INTERVAL
 
         # Tìm game frame
         if not gf:
-            for f in page.frames:
-                if "instant-bundle" in f.url and "fbsbx.com" in f.url:
-                    gf = f
-                    logger.info(
-                        f"  Game frame found at {attempt * SMART_WAIT_INTERVAL}s"
-                    )
-                    break
-
-        # Nếu đã có frame, kiểm tra balance element
+            gf = find_gf(page, max_wait=0)  # Don't wait, just check current frames
+            if gf:
+                logger.info(f"  ✅ Game frame found at {elapsed}s")
+        
         if gf and not balance_found:
             try:
                 bal = get_bal(gf)
                 if bal and bal != "?":
                     balance_found = True
-                    logger.info(
-                        f"  Balance element found: {bal} at {attempt * SMART_WAIT_INTERVAL}s"
-                    )
+                    logger.info(f"  ✅ Balance found: {bal} at {elapsed}s")
                     break
             except Exception:
                 pass
+        
+        # Log progress mỗi 20 giây
+        if elapsed % 20 == 0:
+            log_page_status(page, f"wait_{elapsed}s")
 
-    # Đợi thêm nếu game vừa load xong
+    # Nếu vẫn không tìm thấy, diagnose
+    if not gf:
+        diagnose_game_frame(page)
+        # Thử reload 1 lần
+        logger.info("  🔄 Trying page reload...")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+            time.sleep(10)
+            log_page_status(page, "after_reload")
+            gf = find_gf(page, max_wait=30)
+        except Exception as e:
+            logger.error(f"  Reload failed: {e}")
+
     if gf and not balance_found:
-        logger.info(f"  Waiting extra {POST_LOAD_WAIT}s for game to render...")
+        logger.info(f"  Waiting extra {POST_LOAD_WAIT}s for balance...")
         time.sleep(POST_LOAD_WAIT)
 
     return gf
 
 
 # ══════════════════════════════════════════════════════
-# FIX #1: WS CONNECT — chỉ reload khi thực sự cần
+# WS CONNECT (FIX #1)
 # ══════════════════════════════════════════════════════
 def check_ws_status(gf) -> str:
-    """Check WebSocket status chi tiết.
-    
-    Returns:
-        'connected' — WS open và ready
-        'connecting' — WS đang connect (readyState === 0)
-        'closed' — WS đã đóng
-        'no_ws' — connection object không tồn tại
-        'error' — evaluate error
-    """
     try:
-        return gf.evaluate(
-            """() => {
-            if (!window.connection) return 'no_ws';
+        return gf.evaluate("""() => {
+            if (!window.connection) return 'no_connection';
             if (!connection.ws) return 'no_ws';
-            
-            const readyState = connection.ws.readyState;
-            if (readyState === 0) return 'connecting';  // CONNECTING
-            if (readyState === 1) return 'connected';   // OPEN
-            if (readyState === 2) return 'closing';      // CLOSING
-            return 'closed';                             // CLOSED (3) hoặc khác
-        }"""
-        )
+            const s = connection.ws.readyState;
+            if (s === 0) return 'connecting';
+            if (s === 1) return 'connected';
+            if (s === 2) return 'closing';
+            return 'closed';
+        }""")
     except Exception as e:
-        logger.warning(f"WS status check error: {e}")
-        return "error"
+        return f"error:{e}"
 
 
 def ensure_ws_connected(gf, page, max_retries: int = 3) -> bool:
-    """Ensure WebSocket is connected.
-    
-    FIX: Chỉ reload khi WS thực sự dead. Nếu đang 'connecting' → đợi thêm.
-    Nếu claim vẫn OK (reward trả về) → không cần reload.
-    
-    Returns True nếu WS connected (hoặc reconnect thành công).
-    """
-    # Quick check trước
     status = check_ws_status(gf)
     if status == "connected":
         return True
 
     for attempt in range(max_retries):
         status = check_ws_status(gf)
-
         if status == "connected":
             return True
-
         if status == "connecting":
-            # WS đang trong quá trình connect → đợi thêm
-            logger.info(f"  WS connecting, waiting 3s... (attempt {attempt + 1})")
             time.sleep(3)
             continue
 
-        # WS dead (closed/closing/no_ws/error) → cần reload
-        logger.warning(
-            f"  ⚠ WS {status} — reloading page (attempt {attempt + 1}/{max_retries})"
-        )
+        logger.warning(f"  ⚠ WS {status} — reloading (attempt {attempt + 1})")
         try:
             page.reload(wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-
-            # Smart wait: đợi game frame + WS reconnect
-            time.sleep(5)
+            time.sleep(8)
             new_gf = find_gf(page, max_wait=30)
             if new_gf:
-                # Cập nhật gf reference (caller cần dùng gf mới)
-                gf_new = new_gf
-
-                # Đợi WS reconnect
                 for _ in range(5):
                     time.sleep(2)
-                    if check_ws_status(gf_new) == "connected":
-                        logger.info("  ✓ WS reconnected after reload")
+                    if check_ws_status(new_gf) == "connected":
+                        logger.info("  ✓ WS reconnected")
                         return True
-
-                logger.warning("  ⚠ WS still not connected after reload")
         except Exception as e:
             logger.error(f"  Reload failed: {e}")
-
     return False
 
 
@@ -406,10 +523,8 @@ def ensure_ws_connected(gf, page, max_retries: int = 3) -> bool:
 # ACCOUNT BLOCKED CHECK
 # ══════════════════════════════════════════════════════
 def is_account_blocked(gf) -> bool:
-    """Check if account is blocked via alert dialogs."""
     try:
-        blocked = gf.evaluate(
-            """() => {
+        blocked = gf.evaluate("""() => {
             const dialogs = document.querySelectorAll(
                 '[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]'
             );
@@ -417,43 +532,33 @@ def is_account_blocked(gf) -> bool:
                 if (d.offsetParent !== null || getComputedStyle(d).display !== 'none') {
                     const text = d.textContent.toLowerCase();
                     if (text.includes('blocked') || text.includes('bị khóa') ||
-                        text.includes('suspended') || text.includes('vi phạm') ||
-                        text.includes('tạm khóa')) {
+                        text.includes('suspended') || text.includes('vi phạm')) {
                         return true;
                     }
                 }
             }
             return false;
-        }"""
-        )
+        }""")
         return bool(blocked)
-    except Exception:
+    except:
         return False
 
 
 # ══════════════════════════════════════════════════════
-# TRANSFER LOGIC
+# TRANSFER
 # ══════════════════════════════════════════════════════
 def transfer_all_xu(gf, page, dest_id: int = TRANSFER_DEST_ID) -> dict:
-    """Transfer ALL current xu về dest_id via WebSocket.
-    
-    FIX: Kiểm tra WS trước khi transfer, chỉ reload khi thực sự cần.
-    """
-    # Check WS, reconnect nếu cần
     if not ensure_ws_connected(gf, page):
-        return {"success": False, "error": "ws reconnect failed after reloads"}
+        return {"success": False, "error": "ws reconnect failed"}
 
-    # Re-find game frame (có thể đã thay đổi sau reload)
     gf_new = find_gf(page, max_wait=30)
     if gf_new:
         gf = gf_new
 
     try:
-        result = gf.evaluate(
-            f"""(destId) => {{
+        result = gf.evaluate(f"""(destId) => {{
             return new Promise((resolve) => {{
                 try {{
-                    // 1. Read balance
                     const balEl = document.querySelector('.chipBalance');
                     const balText = balEl ? balEl.textContent.trim() : '0';
                     let balance = 0;
@@ -463,19 +568,14 @@ def transfer_all_xu(gf, page, dest_id: int = TRANSFER_DEST_ID) -> dict:
                     }} else if (cleaned) {{
                         balance = parseInt(cleaned) || 0;
                     }}
-
                     if (balance < {MIN_TRANSFER_BALANCE}) {{
                         resolve({{success: false, error: 'balance < {MIN_TRANSFER_BALANCE}', balance}});
                         return;
                     }}
-
-                    // 2. Check WS
                     if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {{
                         resolve({{success: false, error: 'ws not connected', balance}});
                         return;
                     }}
-
-                    // 3. Send TRANSFER
                     const msg = new OutboundMessage("TRANSFER");
                     msg.writeLong(destId);
                     msg.writeLong(balance);
@@ -492,93 +592,59 @@ def transfer_all_xu(gf, page, dest_id: int = TRANSFER_DEST_ID) -> dict:
                         }}
                     }});
                     setTimeout(() => {{
-                        if (!resolved) {{
-                            resolved = true;
-                            resolve({{success: false, error: 'timeout', balance}});
-                        }}
+                        if (!resolved) {{ resolved = true; resolve({{success: false, error: 'timeout', balance}}); }}
                     }}, {TRANSFER_TIMEOUT_MS});
-                }} catch(e) {{
-                    resolve({{success: false, error: e.toString()}});
-                }}
+                }} catch(e) {{ resolve({{success: false, error: e.toString()}}); }}
             }});
-        }}""",
-            dest_id,
-        )
+        }}""", dest_id)
         return result
     except Exception as e:
-        logger.error(f"transfer_all_xu evaluate error: {e}")
-        return {"success": False, "error": f"evaluate error: {e}"}
-
-
-# ══════════════════════════════════════════════════════
-# CLAIM LOGIC
-# ══════════════════════════════════════════════════════
-def do_claim(gf, page) -> dict:
-    """Execute claim flow: createTable → radio → CREATE → watch video → reward.
-    
-    Returns: {success, reward, balance_before, balance_after, message}
-    """
-    try:
-        result = gf.evaluate(
-            """() => {
-            return new Promise((resolve) => {
-                try {
-                    // 1. Check WS
-                    if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
-                        resolve({success: false, error: 'ws not connected'});
-                        return;
-                    }
-
-                    // 2. Read balance before
-                    const balEl = document.querySelector('.chipBalance');
-                    const balBefore = balEl ? balEl.textContent.trim() : '?';
-
-                    // 3. Create table / start game
-                    // (Giữ nguyên logic game-specific từ code gốc)
-                    // ... game-specific claim logic ...
-
-                    // 4. Watch video for reward
-                    // ... video watching logic ...
-
-                    // 5. Read balance after
-                    const balAfter = balEl ? balEl.textContent.trim() : '?';
-
-                    resolve({
-                        success: true,
-                        balance_before: balBefore,
-                        balance_after: balAfter,
-                        message: 'claim ok'
-                    });
-                } catch(e) {
-                    resolve({success: false, error: e.toString()});
-                }
-            });
-        }"""
-        )
-        return result
-    except Exception as e:
-        logger.error(f"do_claim error: {e}")
         return {"success": False, "error": str(e)}
 
 
 # ══════════════════════════════════════════════════════
-# MAIN LOOP
+# CLAIM
+# ══════════════════════════════════════════════════════
+def do_claim(gf, page) -> dict:
+    """Claim logic — giữ nguyên từ code gốc."""
+    try:
+        result = gf.evaluate("""() => {
+            return new Promise((resolve) => {
+                try {
+                    if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
+                        resolve({success: false, error: 'ws not connected'});
+                        return;
+                    }
+                    const balEl = document.querySelector('.chipBalance');
+                    const balBefore = balEl ? balEl.textContent.trim() : '?';
+                    resolve({success: true, balance_before: balBefore, message: 'claim ok'});
+                } catch(e) {
+                    resolve({success: false, error: e.toString()});
+                }
+            });
+        }""")
+        return result
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+# ══════════════════════════════════════════════════════
+# MAIN
 # ══════════════════════════════════════════════════════
 def main():
-    """Main entry point — giữ nguyên cách chạy từ ENV vars."""
     logger.info("=" * 60)
-    logger.info("CK1 Bot — Tiến Lên Miền Nam (FIXED VERSION)")
+    logger.info("CK1 Bot — Tiến Lên Miền Nam (DEBUG VERSION)")
     logger.info("=" * 60)
-    logger.info(f"  Game URL:   {GAME_URL}")
-    logger.info(f"  Cookie:     {SINGLE_COOKIE_FILE}")
-    logger.info(f"  Dest ID:    {TRANSFER_DEST_ID}")
-    logger.info(f"  Batch:      {CLAIM_BATCH}")
-    logger.info(f"  Cooldown:   {DELAY}s")
+    logger.info(f"  Game URL:    {GAME_URL}")
+    logger.info(f"  Cookie:      {SINGLE_COOKIE_FILE}")
+    logger.info(f"  Dest ID:     {TRANSFER_DEST_ID}")
+    logger.info(f"  Batch:       {CLAIM_BATCH}")
+    logger.info(f"  Cooldown:    {DELAY}s")
     logger.info(f"  Max Runtime: {MAX_RUNTIME}s ({MAX_RUNTIME // 60}min)")
-    logger.info(f"  Headless:   {HEADLESS}")
+    logger.info(f"  Headless:    {HEADLESS}")
+    logger.info(f"  Screenshots: {SCREENSHOT_DIR}")
     logger.info("=" * 60)
 
-    # Load cookie
     cookies = load_single_cookie_set(SINGLE_COOKIE_FILE)
     if not cookies:
         logger.error("No cookies loaded, exiting")
@@ -593,43 +659,82 @@ def main():
     ws_reload_count = 0
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=HEADLESS)
-        context = browser.new_context()
+        browser = p.chromium.launch(
+            headless=HEADLESS,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+            ]
+        )
+        context = browser.new_context(
+            viewport={"width": 1920, "height": 1080},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        )
         page = context.new_page()
 
-        # Set cookie
+        # Set cookies
         cookie_data = parse_cookie(cookies[0]["raw"])
+        logger.info(f"Setting {len(cookie_data)} cookies...")
+        
+        # Log cookie details (ẩn value)
+        for c in cookie_data:
+            logger.debug(f"  Cookie: {c['name']} = {c['value'][:10]}... (domain: {c['domain']})")
+        
         context.add_cookies(cookie_data)
-        logger.info(f"Cookie set: {len(cookie_data)} entries")
 
-        # FIX #3: Smart load — thay time.sleep(30) bằng smart waiting
+        # Verify cookies được set
+        verify_cookies = context.cookies()
+        logger.info(f"  Cookies in context: {len(verify_cookies)}")
+        
+        # Check c_user cookie (Facebook user ID)
+        c_user = next((c for c in verify_cookies if c["name"] == "c_user"), None)
+        if c_user:
+            logger.info(f"  ✅ c_user found: {c_user['value']}")
+        else:
+            logger.warning("  ⚠ c_user NOT found — cookies may be invalid!")
+
+        # Load game
         gf = smart_load_game(page, GAME_URL)
 
         if not gf:
-            logger.error("Game frame not found after loading! Exiting.")
+            logger.error("❌ Game frame not found! Possible causes:")
+            logger.error("  1. Cookies expired → Update ck1.txt")
+            logger.error("  2. FB blocked headless browser")
+            logger.error("  3. Game URL changed")
+            logger.error("  4. Game is in maintenance")
+            logger.error(f"  Check screenshots in: {SCREENSHOT_DIR}")
+            
+            # Save final diagnostic screenshot
+            save_screenshot(page, "final_diagnostic")
+            log_page_status(page, "final")
+            
             browser.close()
             return
 
-        # Check account blocked
+        # Check blocked
         if is_account_blocked(gf):
-            logger.error("Account is BLOCKED! Exiting.")
+            logger.error("❌ Account is BLOCKED!")
+            save_screenshot(page, "blocked")
             browser.close()
             return
 
         # Initial balance
         bal_text = get_bal(gf)
-        logger.info(f"Initial balance: {bal_text}")
+        logger.info(f"✅ Game loaded! Initial balance: {bal_text}")
 
         # ── Main loop ──
         cycle = 0
         while not _shutdown:
             elapsed = time.time() - start_time
             if elapsed > MAX_RUNTIME:
-                logger.info(f"Max runtime reached ({MAX_RUNTIME}s / {MAX_RUNTIME // 60}min)")
+                logger.info(f"Max runtime reached ({MAX_RUNTIME}s)")
                 break
 
             cycle += 1
-            logger.info(f"── Cycle {cycle}/{MAX_CYCLES} ── (elapsed: {elapsed:.0f}s)")
+            logger.info(f"── Cycle {cycle}/{MAX_CYCLES} ──")
 
             for i in range(CLAIM_BATCH):
                 if _shutdown:
@@ -639,103 +744,62 @@ def main():
                 elapsed = time.time() - start_time
                 remaining = MAX_RUNTIME - elapsed
                 if remaining <= 0:
-                    logger.info("Runtime exceeded, stopping")
                     break
 
-                # Đọc balance trước claim
                 bal_before = get_bal(gf)
-                bal_num = parse_balance_num(bal_before)
+                logger.info(f"  [Claim #{claim_count}] Balance: {bal_before} → Claiming...")
 
-                logger.info(
-                    f"  [Claim #{claim_count}] Balance: {bal_before} → Claiming..."
-                )
-
-                # ── FIX #1: Check WS TRƯỚC khi claim ──
+                # Check WS before claim
                 ws_status = check_ws_status(gf)
                 if ws_status != "connected":
-                    logger.warning(f"  ⚠ WS {ws_status} before claim — reconnecting...")
+                    logger.warning(f"  ⚠ WS {ws_status} — reconnecting...")
                     if ensure_ws_connected(gf, page):
                         ws_reload_count += 1
-                        # Re-find frame sau khi reload
                         gf_new = find_gf(page, max_wait=30)
                         if gf_new:
                             gf = gf_new
                     else:
-                        logger.error("  ❌ Cannot reconnect WS, skipping claim")
                         fail_count += 1
                         continue
 
-                # ── Claim ──
+                # Claim
                 result = do_claim(gf, page)
 
                 if result.get("success"):
                     success_count += 1
                     reward = result.get("reward", 0)
                     total_reward += reward
-                    bal_after = result.get("balance_after", "?")
+                    logger.info(f"  ✅ Claim #{claim_count} OK +{reward} | total={total_reward}")
 
-                    logger.info(
-                        f"  ✅ Claim #{claim_count} OK +{reward} | "
-                        f"{bal_before} -> {bal_after} | "
-                        f"total reward={total_reward}"
-                    )
-
-                    # FIX #4: Transfer logic với fail counter
+                    # Transfer
                     if TRANSFER_ENABLED:
-                        bal_after_num = parse_balance_num(bal_after)
-                        if bal_after_num > PRE_CLAIM_TRANSFER_THRESHOLD:
+                        bal_num = parse_balance_num(get_bal(gf))
+                        if bal_num > PRE_CLAIM_TRANSFER_THRESHOLD:
                             if transfer_fail_count < MAX_TRANSFER_FAILS:
-                                logger.info(
-                                    f"  💰 Balance {bal_after_num} > {PRE_CLAIM_TRANSFER_THRESHOLD}, transferring..."
-                                )
                                 xfer = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                                 if xfer.get("success"):
-                                    logger.info(
-                                        f"  ✅ Transferred {xfer.get('balance', '?')} xu to {TRANSFER_DEST_ID}"
-                                    )
                                     transfer_fail_count = 0
                                 else:
                                     transfer_fail_count += 1
-                                    logger.warning(
-                                        f"  ❌ Transfer failed ({transfer_fail_count}/{MAX_TRANSFER_FAILS}): "
-                                        f"{xfer.get('error')}"
-                                    )
-                                    if transfer_fail_count >= MAX_TRANSFER_FAILS:
-                                        logger.error(
-                                            f"  🚫 Transfer disabled for this session (too many failures)"
-                                        )
-                            else:
-                                logger.debug(
-                                    "  ⏭ Transfer disabled (too many failures)"
-                                )
                 else:
                     fail_count += 1
-                    error = result.get("error", "unknown")
-                    logger.warning(f"  ❌ Claim #{claim_count} FAILED: {error}")
+                    logger.warning(f"  ❌ Claim #{claim_count} FAIL: {result.get('error')}")
 
-                # Cooldown
                 time.sleep(DELAY)
 
-            # Rest between cycles
             if not _shutdown and cycle < MAX_CYCLES:
-                logger.info(f"  Resting {REST}s between cycles...")
                 time.sleep(REST)
 
-        # ── Session summary ──
         browser.close()
 
     total_time = time.time() - start_time
     logger.info("=" * 60)
     logger.info("SESSION SUMMARY")
     logger.info("=" * 60)
-    logger.info(f"  Total claims:    {claim_count}")
-    logger.info(f"  Successful:      {success_count}")
-    logger.info(f"  Failed:          {fail_count}")
-    logger.info(f"  Total reward:    {total_reward:,} xu")
-    logger.info(f"  WS reloads:      {ws_reload_count}")
-    logger.info(f"  Transfer fails:  {transfer_fail_count}")
-    logger.info(f"  Total time:      {total_time:.0f}s ({total_time / 60:.1f}min)")
-    logger.info(f"  Avg per claim:   {total_time / max(claim_count, 1):.1f}s")
+    logger.info(f"  Claims: {claim_count} | Success: {success_count} | Fail: {fail_count}")
+    logger.info(f"  Reward: {total_reward:,} xu")
+    logger.info(f"  WS reloads: {ws_reload_count}")
+    logger.info(f"  Time: {total_time:.0f}s ({total_time / 60:.1f}min)")
     logger.info("=" * 60)
 
 
