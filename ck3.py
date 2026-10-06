@@ -16,7 +16,7 @@ except Exception:
 
 from playwright.sync_api import sync_playwright
 
-GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
+GAME_URL = "https://www.facebook.com/gaming/play/gomoku-vh"
 MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
 DELAY = float(os.environ.get("COOLDOWN", "1"))
 REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
