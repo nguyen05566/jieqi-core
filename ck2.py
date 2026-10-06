@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""FB Phom Tala reward bot v10 — FIXED VERSION
-★ Fix: Gọi simulate_human SAU MỖI BATCH (không trước mỗi claim)
+"""FB Phom Tala reward bot v11 — FIXED: Claim Button Not Found
+★ Fix: Chờ game load xong + Sửa selector button + Debug
 """
 
 import os, sys, time, re, random
@@ -78,24 +78,188 @@ def parse_cookie(raw: str):
 
 def get_bal(gf):
     try:
-        return gf.evaluate(
-            "() => document.querySelector('.chipBalance')?.textContent.trim() || '?'"
-        )
+        selectors = [
+            '.chipBalance', '.coinBalance', '.goldBalance',
+            '.balanceText', '.currencyAmount', '[class*="balance"]',
+            '[class*="Balance"]', '[class*="xu"]', '[class*="Xu"]'
+        ]
+        for selector in selectors:
+            bal = gf.evaluate(f"""() => {{
+                const el = document.querySelector('{selector}');
+                return el ? el.textContent.trim() : null;
+            }}""")
+            if bal and bal != '?' and bal != '0':
+                return bal
+        return "?"
     except Exception:
         return "?"
 
-def simulate_human(gf, page):
-    """Mô phỏng hành vi người - CHỈ GỌI SAU MỖI BATCH"""
+def find_gf(page, max_wait=120):
+    """Find game frame"""
+    for _ in range(max_wait // 5):
+        for f in page.frames:
+            if "instant-bundle" in f.url and "fbsbx.com" in f.url:
+                return f
+        time.sleep(5)
+    return None
+
+def is_game_frame_ready(gf):
+    """Kiểm tra game frame đã sẵn sàng chưa"""
     try:
-        page.mouse.move(
-            random.randint(100, 800),
-            random.randint(100, 600)
-        )
-        scroll_amount = random.randint(-50, 50)
-        gf.evaluate(f"window.scrollBy(0, {scroll_amount})")
-        time.sleep(random.uniform(0.5, 1.5))
+        ready = gf.evaluate("""() => {
+            if (!window.connection || !connection.ws || connection.ws.readyState !== 1) {
+                return false;
+            }
+            const gameLoaded = document.querySelector('.game-loaded, .game-ready, [class*="loaded"], [class*="ready"]');
+            return !!gameLoaded;
+        }""")
+        return bool(ready)
     except:
+        return False
+
+def wait_for_game_ready(gf, timeout=120):
+    """Chờ game tải xong và button claim xuất hiện"""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            selectors = [
+                '[class*="claim"]', '[class*="Claim"]',
+                '[class*="nhận"]', '[class*="Nhận"]',
+                '[class*="reward"]', '[class*="Reward"]',
+                '[class*="collect"]', '[class*="Collect"]',
+                '[class*="phom"]', '[class*="Phom"]',
+                '[class*="tala"]', '[class*="Tala"]'
+            ]
+
+            for selector in selectors:
+                button_exists = gf.evaluate(f"""() => {{
+                    const btn = document.querySelector('{selector}');
+                    return btn && btn.offsetParent !== null;
+                }}""")
+                if button_exists:
+                    print(f"[GAME] ✅ Found claim button: {selector}", flush=True)
+                    return True
+
+            print("[GAME] ⏳ Waiting for claim button...", flush=True)
+            time.sleep(5)
+
+        except Exception as e:
+            print(f"[GAME] ⚠️ Error: {e}", flush=True)
+            time.sleep(5)
+
+    print("[GAME] ❌ Claim button not found after timeout", flush=True)
+    return False
+
+def debug_game_state(gf):
+    """In ra trạng thái game để debug"""
+    try:
+        state = gf.evaluate("""() => {
+            return {
+                hasConnection: !!(window.connection && connection.ws),
+                wsReady: window.connection?.ws?.readyState === 1,
+                hasBalance: !!document.querySelector('.chipBalance, .coinBalance, [class*="balance"]'),
+                hasClaimBtn: !!document.querySelector('[class*="claim"], [class*="Claim"], [class*="nhận"]'),
+                visibleButtons: Array.from(document.querySelectorAll('button')).slice(0, 5).map(b => b.textContent?.trim() || '')
+            };
+        }""")
+        print(f"[DEBUG] Connection: {state.get('hasConnection')}, WS Ready: {state.get('wsReady')}", flush=True)
+        print(f"[DEBUG] Has Balance: {state.get('hasBalance')}, Has Claim Btn: {state.get('hasClaimBtn')}", flush=True)
+        print(f"[DEBUG] Visible Buttons: {state.get('visibleButtons')}", flush=True)
+        return state
+    except Exception as e:
+        print(f"[DEBUG] Error: {e}", flush=True)
+        return {}
+
+def click_claim_button(gf):
+    """Click claim button với NHIỀU SELECTOR"""
+    try:
+        selectors = [
+            '[class*="claim"]', '[class*="Claim"]',
+            '[class*="nhận"]', '[class*="Nhận"]',
+            '[class*="reward"]', '[class*="Reward"]',
+            '[class*="collect"]', '[class*="Collect"]',
+            '[class*="phom"]', '[class*="Phom"]',
+            '[class*="tala"]', '[class*="Tala"]',
+            'button.claim-button', 'button.reward-button',
+            '.claim-reward-btn', '.collect-btn',
+            '[data-testid="claim-button"]', '[data-testid="reward-button"]'
+        ]
+
+        for selector in selectors:
+            try:
+                clicked = gf.evaluate(f"""() => {{
+                    const btn = document.querySelector('{selector}');
+                    if (btn && btn.offsetParent !== null && !btn.disabled) {{
+                        btn.click();
+                        return true;
+                    }}
+                    return false;
+                }}""")
+                if clicked:
+                    print(f"[CLAIM] ✅ Clicked with selector: {selector}", flush=True)
+                    return True
+            except:
+                continue
+
+        # Thử click bằng text content
+        print("[CLAIM] ⚠️ Trying text-based selectors...", flush=True)
+        clicked = gf.evaluate("""() => {
+            const btns = document.querySelectorAll('button');
+            for (const btn of btns) {
+                if (btn.offsetParent === null || btn.disabled) continue;
+                const text = (btn.textContent || '').toLowerCase();
+                if (text.includes('claim') || text.includes('nhận') || text.includes('thu') || text.includes('collect')) {
+                    btn.click();
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        return clicked
+
+    except Exception as e:
+        print(f"[CLAIM] ❌ Error: {e}", flush=True)
+        return False
+
+def is_account_blocked(gf):
+    try:
+        blocked = gf.evaluate("""() => {
+            const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
+            for (const d of dialogs) {
+                if (d.offsetParent === null) continue;
+                const txt = (d.textContent || '').toLowerCase();
+                if (txt.includes('blocked') || txt.includes('khóa') || txt.includes('cấm')) {
+                    return true;
+                }
+            }
+            return false;
+        }""")
+        return bool(blocked)
+    except Exception:
+        return False
+
+def ensure_ws_connected(gf, page, max_retries=2):
+    try:
+        ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
+        if ws_ok:
+            return True
+    except Exception:
         pass
+    for retry in range(max_retries):
+        try:
+            print(f"[WS] Reloading page (attempt {retry + 1}/{max_retries})...", flush=True)
+            page.reload()
+            time.sleep(15)
+            gf_new = find_gf(page, max_wait=60)
+            if gf_new:
+                gf = gf_new
+                ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
+                if ws_ok:
+                    return True
+        except Exception as e:
+            print(f"[WS] ⚠️ Error: {e}", flush=True)
+            time.sleep(5)
+    return False
 
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
     if not ensure_ws_connected(gf, page):
@@ -107,7 +271,7 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
         result = gf.evaluate("""(destId) => {
             return new Promise((resolve) => {
                 try {
-                    const balEl = document.querySelector('.chipBalance');
+                    const balEl = document.querySelector('.chipBalance, .coinBalance, [class*="balance"]');
                     const balText = balEl ? balEl.textContent.trim() : '0';
                     let balance = 0;
                     const cleaned = balText.replace(/[^0-9kK.]/g, '');
@@ -154,93 +318,45 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
     except Exception as e:
         return {"success": False, "error": f"evaluate error: {e}"}
 
-def find_gf(page, max_wait=120):
-    for _ in range(max_wait // 5):
-        for f in page.frames:
-            if "instant-bundle" in f.url and "fbsbx.com" in f.url:
-                return f
-        time.sleep(5)
-    return None
-
-def is_account_blocked(gf):
-    try:
-        blocked = gf.evaluate("""() => {
-            const dialogs = document.querySelectorAll('[class*="msgBox"], [class*="dialog"], [class*="Dialog"], [class*="alert"]');
-            for (const d of dialogs) {
-                if (d.offsetParent === null) continue;
-                const txt = (d.textContent || '').toLowerCase();
-                if (txt.includes('blocked') || txt.includes('khóa') || txt.includes('cấm')) {
-                    return true;
-                }
-            }
-            return false;
-        }""")
-        return bool(blocked)
-    except Exception:
-        return False
-
-def ensure_ws_connected(gf, page, max_retries=2):
-    try:
-        ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
-        if ws_ok:
-            return True
-    except Exception:
-        pass
-    for retry in range(max_retries):
-        try:
-            print(f"[WS] Reloading page (attempt {retry + 1}/{max_retries})...", flush=True)
-            page.reload()
-            time.sleep(15)
-            gf_new = find_gf(page, max_wait=60)
-            if gf_new:
-                gf = gf_new
-                ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
-                if ws_ok:
-                    return True
-        except Exception as e:
-            print(f"[WS] ⚠️ Error: {e}", flush=True)
-            time.sleep(5)
-    return False
-
-def click_claim_button(gf):
-    """Click claim button - GIỮ LOGIC GỐC"""
-    try:
-        return gf.evaluate("""() => {
-            const btn = document.querySelector('[class*="claim"], [class*="Claim"], [class*="nhận"], [class*="Nhận"]');
-            if (btn && btn.offsetParent !== null) {
-                btn.click();
-                return true;
-            }
-            return false;
-        }""")
-    except Exception as e:
-        print(f"[CLAIM] ❌ Error: {e}", flush=True)
-        return False
-
 def main():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=HEADLESS)
         context = browser.new_context()
         page = context.new_page()
 
+        # Load cookie
         cookie_set = load_single_cookie_set(SINGLE_COOKIE_FILE)
         if not cookie_set:
             print("[MAIN] ❌ No valid cookie file", flush=True)
             browser.close()
             return
 
+        # Add cookie to browser
         parsed_cookies = parse_cookie(cookie_set[0]['raw'])
         context.add_cookies(parsed_cookies)
 
+        # Navigate to game
         print(f"[MAIN] 🎮 Navigating to {GAME_URL}...", flush=True)
         page.goto(GAME_URL, timeout=120000)
 
+        # 👇 CHỜ 30S SAU KHI LOAD GAME
+        print("[MAIN] ⏳ Waiting for game to initialize...", flush=True)
+        time.sleep(30)
+
+        # Find game frame
         gf = find_gf(page, max_wait=120)
         if not gf:
             print("[MAIN] ❌ Game frame not found", flush=True)
             browser.close()
             return
 
+        # 👇 CHỜ GAME FRAME SẴN SÀNG
+        if not wait_for_game_ready(gf, timeout=120):
+            print("[MAIN] ❌ Game not ready", flush=True)
+            browser.close()
+            return
+
+        # Check if account is blocked
         if is_account_blocked(gf):
             print("[MAIN] ❌ Account is blocked", flush=True)
             browser.close()
@@ -252,12 +368,10 @@ def main():
 
         while time.time() - start_time < MAX_RUNTIME:
             for i in range(CLAIM_BATCH):
-                # 👇 XÓA simulate_human TRƯỚC MỖI CLAIM
-                # simulate_human(gf, page)  # <-- XÓA DÒNG NÀY
-
                 if not click_claim_button(gf):
                     print(f"[CLAIM] ⚠️ Claim button not found (attempt {i+1})", flush=True)
-                    time.sleep(2)
+                    debug_game_state(gf)  # 👈 DEBUG KHI KHÔNG TÌM THẤY
+                    time.sleep(5)
                     continue
 
                 time.sleep(DELAY)
@@ -265,9 +379,6 @@ def main():
                 total_claims += 1
                 bal = get_bal(gf)
                 print(f"[CLAIM] ✅ #{total_claims} | Balance: {bal}", flush=True)
-
-            # 👇 GỌI simulate_human SAU MỖI BATCH (40 claims)
-            simulate_human(gf, page)  # Chỉ 1 lần sau 40 claims
 
             if TRANSFER_ENABLED:
                 print(f"[TRANSFER] Transferring after {CLAIM_BATCH} claims...", flush=True)
