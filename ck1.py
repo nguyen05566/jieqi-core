@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""FB Tien Len Mien Nam reward bot v9 — FIXED VERSION
-★ Giữ nguyên claim logic gốc + fix: find_gf, WS, balance, logging
-
-FIXES:
-  1. find_gf: max(1, max_wait//5) — luôn check ít nhất 1 lần
-  2. ensure_ws_connected: trả về (bool, new_gf) — caller cập nhật frame
-  3. Balance: thêm fallback selectors
-  4. Logging: thay print() bằng logging module
-  5. Graceful shutdown: signal handler
+"""FB Tien Len Mien Nam reward bot v9.1 — FIXED VERSION
+Dựa trên bản gốc v9, fix:
+  1. find_gf: range(0) bug → max(1, ...)
+  2. ensure_ws_connected: trả về (bool, new_gf) thay vì chỉ bool
+  3. Claim counter: claim_count + batch_idx → claim_count + 1
+  4. get_bal: thêm fallback selectors
+  5. print() → logging module
+  6. Thêm graceful shutdown (SIGINT/SIGTERM)
 """
 
 import os, sys, time, re, signal, logging
 
-# ═══════════════ LOGGING ═══════════════
+# ═══════════════ LOGGING (thay print) ═══════════════
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -30,29 +29,26 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
-CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))  # Số claim trước khi transfer
+CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))
 MAX_CYCLES = CLAIM_BATCH
 DELAY = float(os.environ.get("COOLDOWN", "3"))
 REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
-# ============ TRANSFER LOGIC ============
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
-# ============ SINGLE COOKIE MODE ============
 SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck1.txt").strip()
 
-# ============ Pre-claim transfer threshold ============
 PRE_CLAIM_TRANSFER_THRESHOLD = int(os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000"))
 
-# ============ GRACEFUL SHUTDOWN ============
+# ═══════════════ GRACEFUL SHUTDOWN ═══════════════
 _shutdown = False
 
 def _handle_signal(signum, frame):
     global _shutdown
-    logger.warning(f"Received signal {signum}, shutting down...")
+    logger.warning(f"Nhận signal {signum}, đang dừng...")
     _shutdown = True
 
 signal.signal(signal.SIGINT, _handle_signal)
@@ -74,27 +70,25 @@ def parse_balance_num(bal_text):
         return 0
 
 
-# ============================================================
-# ĐỌC COOKIE TỪ FILE DUY NHẤT
-# ============================================================
+# ═══════════════ ĐỌC COOKIE ═══════════════
 def load_single_cookie_set(path):
-    """Đọc đúng 1 file cookie. Trả về [{"file": "...", "raw": "..."}] hoặc []."""
+    """Đọc đúng 1 file cookie."""
     if not os.path.exists(path):
-        logger.error(f"Không tìm thấy file: {path}")
+        logger.error(f"[COOKIE] Không tìm thấy file: {path}")
         return []
     try:
         with open(path, "r", encoding="utf-8") as fh:
             content = fh.read().strip()
     except Exception as e:
-        logger.error(f"Lỗi đọc {path}: {e}")
+        logger.error(f"[COOKIE] Lỗi đọc {path}: {e}")
         return []
     if not content:
-        logger.error(f"{path} rỗng")
+        logger.error(f"[COOKIE] {path} rỗng")
         return []
     content = content.strip('"').strip("'")
     content = " ".join(content.split())
     content = content.replace(";  ", "; ").replace(" ;", ";")
-    logger.info(f"Nạp {os.path.basename(path)} ({len(content)} ký tự)")
+    logger.info(f"[COOKIE] Nạp {os.path.basename(path)} ({len(content)} ký tự)")
     return [{"file": os.path.basename(path), "raw": content}]
 
 
@@ -118,14 +112,12 @@ def parse_cookie(raw: str):
     ]
 
 
-# ============================================================
-# HELPER — ★ FIX: Thêm fallback selectors cho balance
-# ============================================================
+# ═══════════════ HELPER ═══════════════
 def get_bal(gf):
-    """★ FIX: Thử nhiều selectors thay vì chỉ 1."""
+    """★ FIX: Thêm fallback selectors thay vì chỉ .chipBalance."""
     try:
         return gf.evaluate(r"""() => {
-            // Thử selector gốc trước
+            // Selector gốc
             var el = document.querySelector('.chipBalance');
             if (el) {
                 var t = el.textContent.trim();
@@ -134,12 +126,25 @@ def get_bal(gf):
             // Fallback selectors
             var sels = ['.balance', '.chip-count', '.coin-balance',
                 '.coinBalance', '[data-balance]', '[data-chip]',
-                '.game-balance', '.player-balance'];
+                '.game-balance', '.player-balance', '.playerBalance'];
             for (var i = 0; i < sels.length; i++) {
                 var el2 = document.querySelector(sels[i]);
                 if (el2) {
                     var t2 = el2.textContent.trim();
                     if (t2 && t2 !== '?' && /d/.test(t2)) return t2;
+                }
+            }
+            // Fallback: scan DOM tìm số
+            var allEls = document.querySelectorAll('span, div, p');
+            for (var j = 0; j < allEls.length; j++) {
+                var e3 = allEls[j];
+                if (e3.children.length > 2) continue;
+                var t3 = e3.textContent.trim();
+                if (/^[d,]+.?[d]*[kKmM]?$/.test(t3) && t3.length < 15) {
+                    try {
+                        var r = e3.getBoundingClientRect();
+                        if (r.width > 0 && r.height > 0) return t3;
+                    } catch(e) {}
                 }
             }
             return '?';
@@ -149,10 +154,8 @@ def get_bal(gf):
 
 
 def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
-    """Transfer ALL current xu về dest_id via game's connection.send.
-    ★ FIX: Nhận gf mới từ ensure_ws_connected.
-    """
-    # ★ FIX: ensure_ws_connected giờ trả (bool, new_gf)
+    """Transfer ALL current xu về dest_id qua WebSocket."""
+    # ★ FIX: ensure_ws_connected trả về (bool, new_gf)
     ws_ok, new_gf = ensure_ws_connected(gf, page)
     if new_gf:
         gf = new_gf
@@ -214,7 +217,6 @@ def transfer_all_xu(gf, page, dest_id=TRANSFER_DEST_ID):
 # ★ FIX #1: find_gf — luôn check ít nhất 1 lần
 def find_gf(page, max_wait=120):
     """Find game frame. ★ FIX: max(1, ...) đảm bảo luôn check ít nhất 1 lần."""
-    # ★ FIX: range(0) = empty loop → dùng max(1, ...)
     iterations = max(1, max_wait // 5) if max_wait > 0 else 1
     sleep_time = 5 if max_wait > 0 else 0
 
@@ -249,7 +251,7 @@ def is_account_blocked(gf):
 # ★ FIX #2: ensure_ws_connected — trả về (bool, new_gf)
 def ensure_ws_connected(gf, page, max_retries=2):
     """Check WS state, reload page if disconnected.
-    ★ FIX: Trả về (bool, new_gf) để caller cập nhật frame reference.
+    ★ FIX: Trả về (True, gf) hoặc (False, None) để caller cập nhật frame.
     """
     try:
         ws_ok = gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
@@ -262,38 +264,30 @@ def ensure_ws_connected(gf, page, max_retries=2):
     for retry in range(max_retries):
         try:
             page.reload(wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(20000)  # 20s for game to load
-            # ★ FIX: find_gf giờ luôn check ít nhất 1 lần
+            page.wait_for_timeout(20000)
             new_gf = find_gf(page, max_wait=60)
             if not new_gf:
                 logger.warning(f"  ⚠ Reload #{retry+1}: game frame not found")
                 continue
-            # Wait for WS connection
-            for ws_check in range(15):  # 45s wait
+            for ws_check in range(15):
                 try:
                     ws_ok = new_gf.evaluate("() => !!(window.connection && connection.ws && connection.ws.readyState === 1)")
                     if ws_ok:
                         logger.info(f"  ✓ WS reconnected after reload #{retry+1}")
-                        return True, new_gf  # ★ Trả về MỚI gf!
+                        return True, new_gf  # ★ Trả về frame MỚI
                 except:
                     pass
                 page.wait_for_timeout(3000)
         except Exception as e:
-            logger.error(f"  ⚠ Reload #{retry+1} error: {e}")
+            logger.warning(f"  ⚠ Reload #{retry+1} error: {e}")
 
     logger.error(f"  ❌ WS reconnect failed after {max_retries} reloads")
     return False, None  # ★ Trả về None nếu fail
 
 
 def trigger_and_claim(gf, page):
-    """★ GIỮ NGUYÊN LOGIC GỐC — Flow:
-      1. ensure_ws_connected (reload if dead)
-      2. createTable()
-      3. Select radio_11 (game mode)
-      4. Click input[name="CREATE"] (submit)
-      5. If "not enough coin" alert → click "Watch video" button
-      6. Send OutboundMessage("VIDEO_REWARD") → server returns amount
-      7. Retry once if first attempt fails
+    """Claim logic — GIỮ NGUYÊN 100% từ bản gốc.
+    Flow: createTable → radio_11 → CREATE → Watch video → VIDEO_REWARD → retry
     """
     # ★ FIX: Nhận (bool, new_gf) từ ensure_ws_connected
     ws_ok, new_gf = ensure_ws_connected(gf, page, max_retries=1)
@@ -350,7 +344,7 @@ def trigger_and_claim(gf, page):
     if alert_clicked:
         time.sleep(2)
 
-    # Retry logic: try + 1 retry = 2 total attempts
+    # Retry logic: 2 attempts
     max_attempts = 2
     timeout_ms = 15000
     result = None
@@ -397,11 +391,9 @@ def trigger_and_claim(gf, page):
         except Exception as e:
             result = {"success": False, "error": f"evaluate error: {e}"}
 
-        # Check result — if success, break
         if result.get('success') and result.get('amount', 0) > 0:
             break
 
-        # Retry logic
         if attempt < max_attempts - 1:
             err = result.get('error', 'unknown')
             logger.warning(f"  attempt {attempt+1}/{max_attempts}: FAIL ({err}), retrying...")
@@ -416,7 +408,7 @@ def trigger_and_claim(gf, page):
             if new_gf2:
                 gf = new_gf2
             if not ws_ok2:
-                logger.warning(f"  WS still dead, skip retry")
+                logger.warning("  WS still dead, skip retry")
                 break
 
             # Re-click watch video button
@@ -449,11 +441,9 @@ def trigger_and_claim(gf, page):
     return result
 
 
-# ============================================================
-# CONTINUOUS SESSION — ★ FIX: Cập nhật gf sau mỗi ensure_ws
-# ============================================================
+# ═══════════════ CONTINUOUS SESSION ═══════════════
 def run_continuous_session(p, fb_cookies, session_id, started_at):
-    """Mở browser → login FB → load game → (claim → transfer → ...) LIÊN TỤC."""
+    """Mở browser → login FB → load game → loop claim↔transfer."""
     logger.info(f"########## SESSION {session_id} - CONTINUOUS MODE ##########")
 
     browser = p.chromium.launch(
@@ -479,7 +469,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
 
     page = context.new_page()
 
-    # ===== [1] Login FB — 1 LẦN =====
+    # [1] Login FB
     logger.info("[1] Login FB...")
     try:
         page.goto("https://www.facebook.com/", wait_until="domcontentloaded", timeout=30000)
@@ -500,7 +490,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
         pass
     logger.info("  Login OK")
 
-    # ===== [2] Open game — 1 LẦN =====
+    # [2] Open game
     logger.info("[2] Open game...")
     try:
         page.goto(GAME_URL, wait_until="domcontentloaded", timeout=45000)
@@ -511,19 +501,16 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
         return 0, 0, 0, True
 
     page.wait_for_timeout(20000)
-
-    # ★ FIX: find_gf giờ luôn check ít nhất 1 lần
     gf = find_gf(page, max_wait=60)
     if not gf:
         logger.error("Game frame not found")
         try: browser.close()
         except: pass
         return 0, 0, 0, True
-
     logger.info("  Game loaded")
     page.wait_for_timeout(10000)
 
-    # ===== [3] Wait WS — 1 LẦN =====
+    # [3] Wait WS
     logger.info("[3] Wait WS...")
     for _ in range(10):
         try:
@@ -534,7 +521,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             pass
         time.sleep(3)
 
-    # ===== Check blocked =====
+    # Check blocked
     if is_account_blocked(gf):
         logger.error("❌ ACCOUNT BLOCKED — skipping")
         try:
@@ -553,7 +540,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
     bal_start = get_bal(gf)
     logger.info(f"  Balance: {bal_start}")
 
-    # ===== Pre-claim transfer =====
+    # Pre-claim transfer
     bal_start_num = parse_balance_num(bal_start)
     if TRANSFER_ENABLED and bal_start_num > PRE_CLAIM_TRANSFER_THRESHOLD:
         logger.info(f"[Pre-claim] Balance {bal_start_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,}, transferring...")
@@ -561,18 +548,23 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             pre_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
             if pre_result.get('success'):
                 amt = pre_result.get('balance', 0)
+                msg = pre_result.get('message', '')
                 logger.info(f"  ✅ Pre-claim transfer: {amt:,} xu → {TRANSFER_DEST_ID}")
+                if msg: logger.info(f"     Server: {msg[:80]}")
                 time.sleep(2)
                 bal_start = get_bal(gf)
                 logger.info(f"     Balance after: {bal_start}")
             else:
-                logger.warning(f"  ❌ Pre-claim transfer fail: {pre_result.get('error')}")
+                err = pre_result.get('error', 'unknown')
+                logger.warning(f"  ❌ Pre-claim transfer fail: {err}")
+                msg = pre_result.get('message', '')
+                if msg: logger.info(f"     Server: {msg[:80]}")
         except Exception as e:
             logger.error(f"  ❌ Pre-claim transfer exception: {e}")
     elif bal_start_num > 0:
         logger.info(f"  (Balance {bal_start_num:,} ≤ threshold, skip pre-claim transfer)")
 
-    # ===== [4] BATCH LOOP =====
+    # [4] BATCH LOOP
     logger.info(f"[4] BATCH MODE: claim {CLAIM_BATCH} → transfer → repeat...")
     total_reward = 0
     total_transferred = 0
@@ -582,7 +574,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
 
     while True:
         if _shutdown:
-            logger.warning("Shutdown requested")
+            logger.warning("Shutdown requested, dừng...")
             break
 
         elapsed = time.time() - started_at
@@ -590,7 +582,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             logger.info(f"Hết thời gian ({MAX_RUNTIME}s), dừng.")
             break
 
-        # Pre-batch balance check
+        # Pre-batch transfer check
         bal_before_batch = get_bal(gf)
         bal_before_batch_num = parse_balance_num(bal_before_batch)
         if TRANSFER_ENABLED and bal_before_batch_num > PRE_CLAIM_TRANSFER_THRESHOLD:
@@ -598,7 +590,8 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             try:
                 pre_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                 if pre_result.get('success'):
-                    logger.info(f"  ✅ Pre-batch transfer: {pre_result.get('balance', 0):,} xu")
+                    amt = pre_result.get('balance', 0)
+                    logger.info(f"  ✅ Pre-batch transfer: {amt:,} xu → {TRANSFER_DEST_ID}")
                     time.sleep(2)
             except Exception as e:
                 logger.error(f"  ❌ Pre-batch transfer fail: {e}")
@@ -618,15 +611,14 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
 
             bal_before = get_bal(gf)
 
-            # Clean up old dialogs
+            # ★ FIX #3: claim_count + 1 thay vì claim_count + batch_idx + 1
+            logger.info(f"  [Claim #{claim_count + 1}] Balance: {bal_before} → Claiming...")
+
             try:
                 gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
             except Exception:
                 pass
             time.sleep(1)
-
-            # ===== CLAIM =====
-            logger.info(f"  [Claim #{claim_count + batch_idx + 1}] Balance: {bal_before} → Claiming...")
 
             try:
                 result = trigger_and_claim(gf, page)
@@ -662,23 +654,27 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
         if fail >= 8:
             break
 
-        # ===== TRANSFER sau batch =====
+        # Transfer sau batch
         bal_after_batch = get_bal(gf)
         bal_after_batch_num = parse_balance_num(bal_after_batch)
-
         if TRANSFER_ENABLED and bal_after_batch_num > 200:
             logger.info(f"[Transfer] Balance: {bal_after_batch} → Transferring...")
             try:
                 transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                 if transfer_result.get('success'):
                     amt = transfer_result.get('balance', 0)
+                    msg = transfer_result.get('message', '')
                     total_transferred += amt
                     logger.info(f"  ✅ Transferred {amt:,} xu → {TRANSFER_DEST_ID}")
+                    if msg: logger.info(f"     Server: {msg[:80]}")
                     time.sleep(2)
                     bal_after_transfer = get_bal(gf)
                     logger.info(f"     Balance after: {bal_after_transfer}")
                 else:
-                    logger.warning(f"  ❌ Transfer FAIL: {transfer_result.get('error')}")
+                    err = transfer_result.get('error', 'unknown')
+                    logger.warning(f"  ❌ Transfer FAIL: {err}")
+                    msg = transfer_result.get('message', '')
+                    if msg: logger.info(f"     Server: {msg[:80]}")
             except Exception as e:
                 logger.error(f"  ❌ Transfer exception: {e}")
         else:
@@ -690,29 +686,27 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
     return total_reward, ok, fail, True
 
 
-# ============================================================
-# MAIN
-# ============================================================
+# ═══════════════ MAIN ═══════════════
 def main():
     logger.info("=" * 60)
-    logger.info("FB Tien Len Mien Nam reward bot v9 — FIXED VERSION")
-    logger.info("Claim và transfer LIÊN TỤC")
+    logger.info("FB Tien Len Mien Nam reward bot v9.1 — FIXED VERSION")
+    logger.info("Claim và transfer LIÊN TỤC, KHÔNG close/reload/login")
     logger.info("=" * 60)
     logger.info(f"Config: CLAIM_BATCH={CLAIM_BATCH} COOLDOWN={DELAY}s REST={REST}s TRANSFER_DEST={TRANSFER_DEST_ID}")
     logger.info("=" * 60)
 
     cookie_entries = load_single_cookie_set(SINGLE_COOKIE_FILE)
     if not cookie_entries:
-        logger.error(f"Không nạp được cookie từ {SINGLE_COOKIE_FILE}")
+        logger.error(f"[STOP] Không nạp được cookie từ {SINGLE_COOKIE_FILE}")
         return 1
 
     entry = cookie_entries[0]
     fb_cookies = parse_cookie(entry["raw"])
     if not fb_cookies:
-        logger.error(f"Cookie {entry['file']} parse rỗng")
+        logger.error(f"[STOP] Cookie {entry['file']} parse rỗng")
         return 1
 
-    logger.info(f"Đã parse {len(fb_cookies)} cookies từ {entry['file']}")
+    logger.info(f"[COOKIE] Đã parse {len(fb_cookies)} cookies từ {entry['file']}")
 
     started_at = time.time()
     session_id = 0
@@ -722,16 +716,22 @@ def main():
 
     with sync_playwright() as p:
         session_id += 1
+        logger.info(f"
+{'=' * 60}")
         logger.info(f"[Session {session_id}] Starting at {time.strftime('%H:%M:%S')}")
+        logger.info(f"{'=' * 60}")
         total, ok, fail, cookies_ok = run_continuous_session(p, fb_cookies, session_id, started_at)
         grand_reward += total
         grand_ok += ok
         grand_fail += fail
-        logger.info(f"[Session {session_id}] Result: {ok} claims OK, {fail} fail")
+        logger.info(f"
+[Session {session_id}] Result: {ok} claims OK, {fail} fail")
+        logger.info(f"[Total] {grand_ok} claims OK, total reward: {grand_reward:,}")
 
-    logger.info("=" * 60)
+    logger.info(f"
+{'=' * 60}")
     logger.info(f"TỔNG: {session_id} session | {grand_ok} claims ok | {grand_fail} fail | reward={grand_reward:,}")
-    logger.info("=" * 60)
+    logger.info(f"{'=' * 60}")
     return 0
 
 
