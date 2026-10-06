@@ -18,7 +18,7 @@ from playwright.sync_api import sync_playwright
 GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
 CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))  # Số claim trước khi transfer
 MAX_CYCLES = CLAIM_BATCH
-DELAY = float(os.environ.get("COOLDOWN", "1"))
+DELAY = float(os.environ.get("COOLDOWN", "3"))
 REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
