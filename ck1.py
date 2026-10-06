@@ -859,4 +859,4 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         log("\n[EXIT] Người dùng dừng bot.")
-        sys.exit(13000)
+        sys.exit(130)
