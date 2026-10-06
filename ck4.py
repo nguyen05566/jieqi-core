@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""FB Tien Len Mien Nam reward bot v9 — CONTINUOUS MODE
-★ Claim và transfer LIÊN TỤC, KHÔNG cần close/reload/login
-Login FB và load game 1 LẦN duy nhất ở đầu session, sau đó loop:
-  claim (createTable + radio_11 + CREATE + watch video + VIDEO_REWARD) →
-  transfer xu → claim → transfer → ... cho tới hết MAX_RUNTIME.
-"""
+"""FB Tien Len Mien Nam reward bot v9 — BATCH TRANSFER MODE
+★ Claim 40 lần rồi transfer, lặp lại cho đến hết MAX_RUNTIME
+Login FB và load game 1 LẦN duy nhất ở đầu session, sau đó:
+  loop: claim 40 lần → transfer → claim 40 lần → transfer → ... cho tới hết MAX_RUNTIME"""
+
 import os, sys, time, re
 
 # Thử import module bổ trợ nếu có (không bắt buộc)
@@ -17,14 +16,15 @@ except Exception:
 from playwright.sync_api import sync_playwright
 
 GAME_URL = "https://www.facebook.com/gaming/play/maubinh_xapxam"
-MAX_CYCLES = int(os.environ.get("MAX_CLAIMS", "30"))
+CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))  # Số claim trước khi transfer
+MAX_CYCLES = CLAIM_BATCH
 DELAY = float(os.environ.get("COOLDOWN", "1"))
 REST = int(os.environ.get("REST_BETWEEN_RUNS", "3"))
 MAX_RUNTIME = int(os.environ.get("MAX_RUNTIME", str(330 * 60)))
 HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 # ============ TRANSFER LOGIC ============
-# Transfer xu về hub account 51977054 sau mỗi claim
+# Transfer xu về hub account sau mỗi CLAIM_BATCH lần claim
 TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
@@ -570,68 +570,95 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
         print(f"  (Balance {bal_start_num:,} ≤ {PRE_CLAIM_TRANSFER_THRESHOLD:,}, "
               f"skip pre-claim transfer)", flush=True)
 
-    # ===== [4] CONTINUOUS LOOP: claim → transfer → claim → transfer → ... =====
-    print(f"\n[4] CONTINUOUS MODE: claim → transfer → claim → transfer → ...", flush=True)
+    # ===== [4] BATCH LOOP: claim CLAIM_BATCH times → transfer → repeat =====
+    print(f"\n[4] BATCH MODE: claim {CLAIM_BATCH} times → transfer → repeat...", flush=True)
     total_reward = 0
     total_transferred = 0
     ok = 0
     fail = 0
     claim_count = 0
 
+    # Outer loop: claim CLAIM_BATCH times → transfer → repeat
     while True:
         elapsed = time.time() - started_at
         if elapsed > MAX_RUNTIME:
             print(f"  Hết thời gian ({MAX_RUNTIME}s), dừng.", flush=True)
             break
 
-        bal_before = get_bal(gf)
+        # Check pre-claim balance and transfer if needed
+        bal_before_batch = get_bal(gf)
+        bal_before_batch_num = parse_balance_num(bal_before_batch)
+        if TRANSFER_ENABLED and bal_before_batch_num > PRE_CLAIM_TRANSFER_THRESHOLD:
+            print(f"\n[BATCH START] Balance: {bal_before_batch} → Pre-batch transfer...", flush=True)
+            try:
+                pre_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
+                if pre_result.get('success'):
+                    amt = pre_result.get('balance', 0)
+                    print(f"  ✅ Pre-batch transfer: {amt:,} xu → {TRANSFER_DEST_ID}", flush=True)
+                    time.sleep(2)
+            except Exception as e:
+                print(f"  ❌ Pre-batch transfer fail: {e}", flush=True)
 
-        # ===== CLAIM =====
-        print(f"\n[Claim #{claim_count + 1}] Balance: {bal_before} → Claiming...", flush=True)
-        try:
-            gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
-        except Exception:
-            pass
-        time.sleep(1)
+        # ===== INNER BATCH LOOP: claim CLAIM_BATCH times =====
+        print(f"\n[Claim Batch #{claim_count // CLAIM_BATCH + 1}] Starting {CLAIM_BATCH} claims...", flush=True)
 
-        try:
-            result = trigger_and_claim(gf, page)
-        except Exception as e:
-            print(f"  EXCEPTION ({e})", flush=True)
-            fail += 1
-            if fail >= 8:
+        for batch_idx in range(CLAIM_BATCH):
+            elapsed = time.time() - started_at
+            if elapsed > MAX_RUNTIME:
+                print(f"  Hết thời gian ({MAX_RUNTIME}s) trong quá trình claim, dừng.", flush=True)
                 break
-            time.sleep(DELAY)
-            continue
 
-        if result.get('success') and result.get('amount', 0) > 0:
-            amount = result['amount']
-            total_reward += amount
-            ok += 1
-            claim_count += 1
-            fail = 0
+            bal_before = get_bal(gf)
+
+            # ===== CLAIM =====
+            print(f"  [Claim #{claim_count + batch_idx + 1}] Balance: {bal_before} → Claiming...", flush=True)
+            try:
+                gf.evaluate("$('.msgBoxBackGround,.msgBox').remove()")
+            except Exception:
+                pass
             time.sleep(1)
-            bal_after_claim = get_bal(gf)
-            print(f"  ✅ Claim #{claim_count} OK +{amount} | {bal_before} -> {bal_after_claim} "
-                  f"| total reward={total_reward}", flush=True)
-        else:
-            fail += 1
-            err = result.get('error', 'unknown')
-            method = result.get('method', '')
-            print(f"  ❌ Claim FAIL ({err}) [{method}] | {bal_before}", flush=True)
+
+            try:
+                result = trigger_and_claim(gf, page)
+            except Exception as e:
+                print(f"    EXCEPTION ({e})", flush=True)
+                fail += 1
+                if fail >= 8:
+                    break
+                time.sleep(DELAY)
+                continue
+
+            if result.get('success') and result.get('amount', 0) > 0:
+                amount = result['amount']
+                total_reward += amount
+                ok += 1
+                claim_count += 1
+                fail = 0
+                time.sleep(1)
+                bal_after_claim = get_bal(gf)
+                print(f"    ✅ Claim #{claim_count} OK +{amount} | {bal_before} -> {bal_after_claim} "
+                      f"| total reward={total_reward}", flush=True)
+            else:
+                fail += 1
+                err = result.get('error', 'unknown')
+                method = result.get('method', '')
+                print(f"    ❌ Claim FAIL ({err}) [{method}] | {bal_before}", flush=True)
+
+            if fail >= 8:
+                print("  Too many fails, stopping batch", flush=True)
+                break
+
+            time.sleep(DELAY)
 
         if fail >= 8:
-            print("  Too many fails, stopping", flush=True)
             break
 
-        time.sleep(DELAY)
+        # ===== TRANSFER (sau khi claim hết batch) =====
+        bal_after_batch = get_bal(gf)
+        bal_after_batch_num = parse_balance_num(bal_after_batch)
 
-        # ===== TRANSFER (sau mỗi claim thành công) =====
-        bal_after_claim = get_bal(gf)
-        bal_after_num = parse_balance_num(bal_after_claim)
-
-        if TRANSFER_ENABLED and bal_after_num > 200:
-            print(f"\n[Transfer #{claim_count}] Balance: {bal_after_claim} → Transferring...", flush=True)
+        if TRANSFER_ENABLED and bal_after_batch_num > 200:
+            print(f"\n[Transfer] Balance: {bal_after_batch} → Transferring...", flush=True)
             try:
                 transfer_result = transfer_all_xu(gf, page, TRANSFER_DEST_ID)
                 if transfer_result.get('success'):
@@ -653,7 +680,7 @@ def run_continuous_session(p, fb_cookies, session_id, started_at):
             except Exception as e:
                 print(f"  ❌ Transfer exception: {e}", flush=True)
         else:
-            print(f"  ⚠ Balance {bal_after_num} ≤ 200, skip transfer", flush=True)
+            print(f"  ⚠ Balance {bal_after_batch_num} ≤ 200, skip transfer", flush=True)
 
         time.sleep(DELAY)
 
@@ -672,7 +699,7 @@ def main():
     print("FB Tien Len Mien Nam reward bot v9 — CONTINUOUS MODE")
     print("Claim và transfer LIÊN TỤC, KHÔNG close/reload/login")
     print("=" * 60)
-    print(f"Config: MAX_CLAIMS={MAX_CYCLES} COOLDOWN={DELAY}s REST={REST}s "
+    print(f"Config: CLAIM_BATCH={CLAIM_BATCH} COOLDOWN={DELAY}s REST={REST}s "
           f"TRANSFER_DEST={TRANSFER_DEST_ID}", flush=True)
     print("=" * 60)
 
