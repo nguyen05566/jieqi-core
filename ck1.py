@@ -625,4 +625,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-Bug Report: range(0) = empty loop + stale
