@@ -39,7 +39,7 @@ jobs:
           COOLDOWN: '3'
           REST_BETWEEN_RUNS: '5'
           MAX_RUNTIME: '21000'   # 5h50m, để 10 phút buffer trước khi timeout 6h
-          TRANSFER_DEST_ID: '71391352'
+          TRANSFER_DEST_ID: '71391343'
           TRANSFER_ENABLED: 'true'
         run: |
           set +e
