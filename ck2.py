@@ -23,6 +23,16 @@ try:
 except Exception:
     m = None
 
+# === Module chống khóa nick (anti-ban) ===
+# Cung cấp: fingerprint per-account, stealth JS, human-like timing,
+# daily quota, soft-ban detection, transfer dest rotation.
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import anti_lock as al
+except Exception as e:
+    print(f"[WARN] Không nạp được anti_lock.py — chạy không có chống khóa nick: {e}", flush=True)
+    al = None
+
 from playwright.sync_api import sync_playwright
 
 # ============================================================
@@ -51,6 +61,21 @@ FRAME_WAIT              = int(os.environ.get("FRAME_WAIT", "90"))            # g
 WS_WAIT                 = int(os.environ.get("WS_WAIT", "60"))               # giây chờ websocket
 MAX_CONSEC_CLAIM_FAIL   = int(os.environ.get("MAX_CONSEC_CLAIM_FAIL", "6"))  # claim fail liên tiếp
 MIN_TIME_LEFT           = 90                                                  # còn < 90s thì không bày trò nữa
+
+# ---- Quota hàng ngày (chống spam server) ----
+MAX_CLAIMS_PER_DAY         = int(os.environ.get("MAX_CLAIMS_PER_DAY", str(getattr(al, "DEFAULT_MAX_CLAIMS_PER_DAY", 180) if al else 180)))
+MAX_TRANSFERS_PER_DAY      = int(os.environ.get("MAX_TRANSFERS_PER_DAY", str(getattr(al, "DEFAULT_MAX_TRANSFERS_PER_DAY", 30) if al else 30)))
+MAX_TRANSFER_AMOUNT_PER_DAY = int(os.environ.get("MAX_TRANSFER_AMOUNT_PER_DAY", str(getattr(al, "DEFAULT_MAX_TRANSFER_AMOUNT", 2_000_000) if al else 2_000_000)))
+
+# ---- Random session start offset (giây) ----
+# Tránh 8 cookie đồng loạt bật browser cùng lúc.
+SESSION_START_JITTER = int(os.environ.get("SESSION_START_JITTER", "180"))
+
+# ---- Idle break mỗi N claim ----
+IDLE_EVERY_CLAIMS = int(os.environ.get("IDLE_EVERY_CLAIMS", "60"))
+
+# ---- Có bật warm-up account trước khi vào game không? ----
+WARMUP_ENABLED = os.environ.get("WARMUP_ENABLED", "true").lower() == "true"
 
 FRAME_ERR_HINTS = (
     "detach", "execution context", "target closed", "has been closed",
@@ -568,17 +593,35 @@ def run_session(p, fb_cookies, session_id, started_at):
     cookie_ok = True
 
     try:
+        # ===== [ANTI-BAN] Lấy fingerprint cố định cho cookie này =====
+        fp = al.get_or_create_fingerprint(SINGLE_COOKIE_FILE) if al else None
+        log(f"[ANTI-BAN] Fingerprint: UA={fp['user_agent'][:60]}... viewport={fp['viewport']} locale={fp['locale'] if fp else 'en-US'}" if fp else "[ANTI-BAN] Module anti_lock không khả dụng — chạy mode cũ")
+
         browser = p.chromium.launch(
             headless=HEADLESS,
-            args=["--no-sandbox", "--disable-dev-shm-usage",
-                  "--disable-blink-features=AutomationControlled"],
+            args=al.stealth_launch_args() if al else ["--no-sandbox", "--disable-dev-shm-usage", "--disable-blink-features=AutomationControlled"],
         )
-        context = browser.new_context(
-            viewport={"width": 1920, "height": 1080}, locale="en-US",
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/139.0.0.0 Safari/537.36",
-        )
+        context_kwargs = {
+            "viewport": fp["viewport"] if fp else {"width": 1920, "height": 1080},
+            "locale":   fp["locale"]   if fp else "en-US",
+            "user_agent": fp["user_agent"] if fp else ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                                       "Chrome/139.0.0.0 Safari/537.36"),
+            "timezone_id": fp["timezone"] if fp else None,
+            "color_scheme": fp.get("color_scheme", "light") if fp else "light",
+        }
+        # Xóa None values để Playwright không phàn nàn
+        context_kwargs = {k: v for k, v in context_kwargs.items() if v is not None}
+        context = browser.new_context(**context_kwargs)
+
+        # ===== [ANTI-BAN] Inject stealth JS vào mọi frame trước khi load =====
+        if al and fp:
+            try:
+                context.add_init_script(al.build_stealth_js(fp))
+                log("[ANTI-BAN] Stealth JS injected OK")
+            except Exception as e:
+                log(f"[ANTI-BAN] Stealth JS inject fail: {e}")
+
         try:
             cookies = []
             for c in fb_cookies:
@@ -608,6 +651,15 @@ def run_session(p, fb_cookies, session_id, started_at):
             log(f"  ❌ {e}")
             return 0, 0, 0, 0, False
         log("  OK")
+
+        # ===== [ANTI-BAN] Warm-up account: scroll FB feed 5-15s trước khi vào game =====
+        if WARMUP_ENABLED and al:
+            log("[ANTI-BAN] Warm-up: scroll FB feed...")
+            try:
+                al.warm_up_account(page, max_s=15)
+                log("  Warm-up OK")
+            except Exception as e:
+                log(f"  Warm-up fail (ignore): {e}")
 
         # ===== [2] Mở game =====
         log("[2] Open game...")
@@ -655,11 +707,27 @@ def run_session(p, fb_cookies, session_id, started_at):
         bal_start = s.get_bal()
         log(f"  Balance: {bal_start}")
 
+        # ===== [ANTI-BAN] Daily quota check =====
+        if al:
+            ok_quota, reason = al.check_daily_quota(
+                SINGLE_COOKIE_FILE,
+                max_claims=MAX_CLAIMS_PER_DAY,
+                max_transfers=MAX_TRANSFERS_PER_DAY,
+                max_amount=MAX_TRANSFER_AMOUNT_PER_DAY,
+            )
+            if not ok_quota:
+                log(f"  ⏸ [ANTI-BAN] Bỏ qua session: {reason}")
+                return 0, 0, 0, 0, True
+            al.record_session_start(SINGLE_COOKIE_FILE)
+
         # ===== [4] BATCH LOOP =====
-        log(f"\n[4] BATCH MODE: claim {CLAIM_BATCH} lần -> transfer -> lặp lại")
+        log(f"\n[4] BATCH MODE: claim ~{CLAIM_BATCH} lần/jitter -> transfer -> lặp lại")
         claim_count = 0
         batch_no = 0
         consec_fail = 0
+        # dest_id cố định theo env TRANSFER_DEST_ID (set trong .github/workflows/ckN.yml)
+        # KHÔNG xoay vòng — mỗi cookie có 1 hub account riêng theo yml.
+        dest_id = TRANSFER_DEST_ID
 
         while True:
             if s.time_left() <= MIN_TIME_LEFT:
@@ -668,28 +736,38 @@ def run_session(p, fb_cookies, session_id, started_at):
 
             batch_no += 1
 
+            # [ANTI-BAN] Batch size jitter (25-55 thay vì fixed 40)
+            cur_batch = al.random_batch_size(CLAIM_BATCH, lo=max(10, CLAIM_BATCH-5), hi=CLAIM_BATCH+5) if al else CLAIM_BATCH
+
             # --- pre-batch transfer nếu balance cao ---
             bal_before_batch = s.get_bal()
             bal_num = parse_balance_num(bal_before_batch)
             if TRANSFER_ENABLED and bal_num > PRE_CLAIM_TRANSFER_THRESHOLD:
                 log(f"\n[Pre-batch] Balance {bal_num:,} > {PRE_CLAIM_TRANSFER_THRESHOLD:,} -> transfer trước")
-                r = transfer_all_xu(s, TRANSFER_DEST_ID)
+                r = transfer_all_xu(s, dest_id)
                 if r.get("success"):
                     amt = r.get("balance", 0)
                     total_transferred += amt
-                    log(f"  ✅ Pre-batch transfer {amt:,} xu -> {TRANSFER_DEST_ID}")
+                    log(f"  ✅ Pre-batch transfer {amt:,} xu -> {dest_id}")
                     msg = r.get("message", "")
                     if msg:
                         log(f"     Server: {msg[:80]}")
+                    # [ANTI-BAN] Soft-ban detect + record transfer
+                    if al:
+                        if al.detect_soft_ban(msg) or al.detect_soft_ban(r.get("error", "")):
+                            log("  🚫 [ANTI-BAN] Soft-ban detected — back-off 15 phút")
+                            al.set_soft_ban(SINGLE_COOKIE_FILE, duration_s=900)
+                            return total_reward, total_transferred, ok, fail_total, True
+                        al.record_transfer(SINGLE_COOKIE_FILE, amt)
                     time.sleep(2)
                 else:
                     log(f"  ❌ Pre-batch transfer fail: {r.get('error', 'unknown')}")
 
             # --- claim batch ---
-            log(f"\n[Batch #{batch_no}] bắt đầu {CLAIM_BATCH} claim...")
+            log(f"\n[Batch #{batch_no}] bắt đầu {cur_batch} claim (dest={dest_id})...")
             stop_session = False
 
-            for i in range(CLAIM_BATCH):
+            for i in range(cur_batch):
                 if s.time_left() <= MIN_TIME_LEFT:
                     log("  ⏹ Hết thời gian trong lúc claim, dừng.")
                     stop_session = True
@@ -698,9 +776,16 @@ def run_session(p, fb_cookies, session_id, started_at):
                 bal_before = s.get_bal()
                 log(f"  [Claim #{claim_count + 1}] Balance: {bal_before} -> claiming...")
                 s.close_dialogs()
-                time.sleep(1)
+                al.jitter_sleep(1.0, 1.0) if al else time.sleep(1)
 
                 result = trigger_and_claim(s)
+
+                # [ANTI-BAN] Soft-ban detect trong response
+                if al and (al.detect_soft_ban(result.get("error", "")) or
+                           al.detect_soft_ban(result.get("message", ""))):
+                    log("  🚫 [ANTI-BAN] Soft-ban detected trong claim response — back-off 15 phút")
+                    al.set_soft_ban(SINGLE_COOKIE_FILE, duration_s=900)
+                    return total_reward, total_transferred, ok, fail_total, True
 
                 if result.get("success") and result.get("amount", 0) > 0:
                     amount = result["amount"]
@@ -708,15 +793,33 @@ def run_session(p, fb_cookies, session_id, started_at):
                     ok += 1
                     claim_count += 1
                     consec_fail = 0
-                    time.sleep(1)
+                    if al:
+                        al.record_claim(SINGLE_COOKIE_FILE, amount)
+                    # [ANTI-BAN] Human-like delay (Poisson 2-6s) thay vì fixed
+                    al.jitter_sleep(1.0, 0.8) if al else time.sleep(1)
                     bal_after = s.get_bal()
                     log(f"    ✅ OK +{amount} | {bal_before} -> {bal_after} | tổng reward={total_reward:,}")
+
+                    # [ANTI-BAN] Idle break mỗi IDLE_EVERY_CLAIMS claim — giả lập người nghỉ
+                    if al and IDLE_EVERY_CLAIMS > 0:
+                        try:
+                            al.maybe_idle_browse(page, claim_count, every=IDLE_EVERY_CLAIMS)
+                        except Exception:
+                            pass
                 else:
                     fail_total += 1
                     consec_fail += 1
                     err = result.get("error", "unknown")
                     method = result.get("method", "")
                     log(f"    ❌ FAIL ({err}) [{method}] | fail liên tiếp: {consec_fail}")
+
+                    # [GAME-RULE] Phát hiện fail vì balance cao (>50k — game chặn claim khi >55k)
+                    # → ép transfer ngay, không recover vô ích (recover cũng không giúp gì được)
+                    cur_bal_num = parse_balance_num(s.get_bal())
+                    if cur_bal_num >= 50000:
+                        log(f"  💸 Balance {cur_bal_num:,} >= 50k — game chặn claim, ÉP TRANSFER ngay")
+                        # thoát vòng for để chạy post-batch transfer
+                        break
 
                     if consec_fail >= MAX_CONSEC_CLAIM_FAIL:
                         log(f"  ⚠ {consec_fail} lần fail liên tiếp -> thử recover 1 lần")
@@ -731,21 +834,32 @@ def run_session(p, fb_cookies, session_id, started_at):
                             raise
                         # nếu recover OK thì tiếp tục batch
 
-                time.sleep(DELAY + random.uniform(0, 1.5))
+                # [ANTI-BAN] Human-like delay giữa các claim (Poisson) thay vì fixed 3s+rand(0,1.5)
+                if al:
+                    al.human_delay(max(2.0, DELAY), max(4.0, DELAY + 3.0))
+                else:
+                    time.sleep(DELAY + random.uniform(0, 1.5))
 
             # --- transfer sau batch ---
             bal_after_batch = s.get_bal()
             bal_after_num = parse_balance_num(bal_after_batch)
             if TRANSFER_ENABLED and bal_after_num > 200:
-                log(f"\n[Transfer] Balance: {bal_after_batch} -> đang chuyển...")
-                r = transfer_all_xu(s, TRANSFER_DEST_ID)
+                log(f"\n[Transfer] Balance: {bal_after_batch} -> đang chuyển về {dest_id}...")
+                r = transfer_all_xu(s, dest_id)
                 if r.get("success"):
                     amt = r.get("balance", 0)
                     total_transferred += amt
-                    log(f"  ✅ Đã chuyển {amt:,} xu -> {TRANSFER_DEST_ID}")
+                    log(f"  ✅ Đã chuyển {amt:,} xu -> {dest_id}")
                     msg = r.get("message", "")
                     if msg:
                         log(f"     Server: {msg[:80]}")
+                    # [ANTI-BAN] Record transfer + soft-ban detect
+                    if al:
+                        if al.detect_soft_ban(msg) or al.detect_soft_ban(r.get("error", "")):
+                            log("  🚫 [ANTI-BAN] Soft-ban detected — back-off 15 phút")
+                            al.set_soft_ban(SINGLE_COOKIE_FILE, duration_s=900)
+                            return total_reward, total_transferred, ok, fail_total, True
+                        al.record_transfer(SINGLE_COOKIE_FILE, amt)
                     time.sleep(2)
                     log(f"     Balance sau transfer: {s.get_bal()}")
                 else:
@@ -753,12 +867,21 @@ def run_session(p, fb_cookies, session_id, started_at):
                     msg = r.get("message", "")
                     if msg:
                         log(f"     Server: {msg[:80]}")
+                    # [ANTI-BAN] Soft-ban detect trong fail response
+                    if al and al.detect_soft_ban(r.get("error", "")):
+                        log("  🚫 [ANTI-BAN] Soft-ban detected trong transfer fail — back-off 15 phút")
+                        al.set_soft_ban(SINGLE_COOKIE_FILE, duration_s=900)
+                        return total_reward, total_transferred, ok, fail_total, True
             else:
                 log(f"  ⚠ Balance {bal_after_num:,} ≤ 200, bỏ qua transfer")
 
             if stop_session:
                 break
-            time.sleep(DELAY)
+            # [ANTI-BAN] Rest giữa 2 batch cũng nên có jitter
+            if al:
+                al.human_delay(max(3.0, DELAY), max(8.0, DELAY + 5.0))
+            else:
+                time.sleep(DELAY)
 
     except SessionDead as e:
         log(f"\n[SESSION {session_id}] 💀 SESSION DEAD: {e}")
@@ -803,6 +926,23 @@ def main():
         log(f"[STOP] Cookie {entry['file']} parse rỗng — có thể sai định dạng.")
         return 1
     log(f"[COOKIE] ✅ Đã parse {len(fb_cookies)} cookies từ {entry['file']}")
+
+    # [ANTI-BAN] Daily quota check ngay từ đầu
+    if al:
+        ok_quota, reason = al.check_daily_quota(
+            SINGLE_COOKIE_FILE,
+            max_claims=MAX_CLAIMS_PER_DAY,
+            max_transfers=MAX_TRANSFERS_PER_DAY,
+            max_amount=MAX_TRANSFER_AMOUNT_PER_DAY,
+        )
+        if not ok_quota:
+            log(f"\n[ANTI-BAN] ⏸ Dừng ngay: {reason}")
+            return 0
+
+    # [ANTI-BAN] Random session start offset để 8 cookie không đồng loạt bật cùng lúc
+    if al and SESSION_START_JITTER > 0:
+        wait = al.random_session_offset(SESSION_START_JITTER)
+        log(f"\n[ANTI-BAN] ⏳ Session start jitter: nghỉ {wait:.1f}s trước khi mở browser...")
 
     started_at = time.time()
     session_id = 0

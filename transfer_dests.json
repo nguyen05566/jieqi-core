@@ -1,0 +1,9 @@
+{
+  "_comment": "OPTIONAL: dest rotation list. Mặc định KHÔNG dùng — mỗi ckN.py lấy TRANSFER_DEST_ID từ .github/workflows/ckN.yml (env var). Nếu bạn muốn 1 nick transfer về nhiều hub khác nhau cho mỗi batch, set env DEST_ROTATION=true thì module sẽ đọc file này. Mặc định file này không có tác dụng.",
+  "_default_behavior": "Mỗi workflow yml set TRANSFER_DEST_ID='71391343' (hoặc ID hub của bạn). Code đọc env var đó, KHÔNG đụng tới file này.",
+  "_optional_usage": "Muốn dùng xoay vòng: set DEST_ROTATION=true trong yml. Khi đó pick_next_dest() sẽ hash tên cookie_file để pick 1 dest cố định per-cookie từ list dưới.",
+  "dests": [
+    71391343,
+    68307415
+  ]
+}

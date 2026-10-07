@@ -1,47 +1,26 @@
-# Dependencies
-node_modules/
-.next/
+# State files chứa thông tin runtime per-cookie (số claim hôm nay, soft-ban timestamps)
+# KHÔNG commit lên git vì có thể leak pattern detect được.
+state/
+fingerprints/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-/tmp/
-
-# Environment
-.env.local
-.env.*.local
-
-# Build
-/dist/
-build/
-
-# Cache
-.cache/
-
-# Python
+# Python cache
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
+*.pyc
+*.pyo
+*.pyd
 .Python
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-.nox/
-.eggs/
-*.egg-info/
-*.egg
 
 # Playwright
 playwright-report/
 test-results/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Test artifact
+ck_test.txt
