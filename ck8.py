@@ -28,7 +28,7 @@ from playwright.sync_api import sync_playwright
 # ============================================================
 # CONFIG
 # ============================================================
-GAME_URL = "https://www.facebook.com/gaming/play/pool_club_billiards"
+GAME_URL = "https://www.facebook.com/gaming/play/phom_tala"
 
 CLAIM_BATCH   = int(os.environ.get("CLAIM_BATCH", "40"))          # claim bao nhiêu lần rồi transfer
 DELAY         = float(os.environ.get("COOLDOWN", "3"))            # nghỉ giữa 2 lần claim
