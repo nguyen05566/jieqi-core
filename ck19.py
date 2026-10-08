@@ -23,7 +23,7 @@ except Exception as e:
 
 from playwright.sync_api import sync_playwright
 
-GAME_URL = "https://www.facebook.com/gaming/play/maubinh_xapxam"
+GAME_URL = "https://www.facebook.com/gaming/play/chinese-chess-vh"
 CLAIM_BATCH = int(os.environ.get("CLAIM_BATCH", "40"))  # Số claim trước khi transfer
 MAX_CYCLES = CLAIM_BATCH
 DELAY = float(os.environ.get("COOLDOWN", "3"))
@@ -37,7 +37,7 @@ TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 
 # ============ SINGLE COOKIE MODE ============
-SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck15.txt").strip()
+SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck14.txt").strip()
 
 # ============ Pre-claim transfer threshold ============
 # Nếu balance > ngưỡng này (xu), transfer trước khi claim tiếp
