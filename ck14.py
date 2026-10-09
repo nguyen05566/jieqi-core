@@ -1,4 +1,4 @@
-```python
+
 #!/usr/bin/env python3
 """
 FB Tien Len Mien Nam reward bot v13 — SELF-CONTAINED SINGLE FILE
@@ -733,4 +733,4 @@ if __name__ == "__main__":
     try: sys.exit(main())
     except KeyboardInterrupt: sys.exit(130)
 
-```
+
