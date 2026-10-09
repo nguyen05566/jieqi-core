@@ -27,7 +27,7 @@ from playwright.sync_api import sync_playwright
 # ============================================================
 # CONFIG
 # ============================================================
-GAME_URL = "https://www.facebook.com/gaming/play/tienlen_miennam"
+GAME_URL = "https://www.facebook.com/gaming/play/gomoku-vh"
 
 CLAIM_BATCH   = int(os.environ.get("CLAIM_BATCH", "40"))
 DELAY         = float(os.environ.get("COOLDOWN", "3"))
@@ -39,7 +39,7 @@ TRANSFER_DEST_ID = int(os.environ.get("TRANSFER_DEST_ID", "51977054"))
 TRANSFER_ENABLED = os.environ.get("TRANSFER_ENABLED", "true").lower() == "true"
 PRE_CLAIM_TRANSFER_THRESHOLD = int(os.environ.get("PRE_CLAIM_TRANSFER_THRESHOLD", "10000"))
 
-SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck1.txt").strip()
+SINGLE_COOKIE_FILE = os.environ.get("SINGLE_COOKIE_FILE", "ck14.txt").strip()
 
 MAX_SESSIONS            = int(os.environ.get("MAX_SESSIONS", "12"))
 MAX_RELOADS_PER_SESSION = int(os.environ.get("MAX_RELOADS", "8"))
